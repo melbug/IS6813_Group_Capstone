@@ -1,5 +1,5 @@
 # Group 6 MSBA Capstone Project
-## Summary of Approach & Recommendations
+## Project Summary
 
 ### Approach
 We first attempted supervised and unsupervised models to find provided or engineered features correlated with growth from 2023-2024.
