@@ -18,15 +18,15 @@ We conclude that our work demonstrates the usefulness of the HTE modeling techni
 
 ## Document List
 
-1. Business Problem Statement
-Summary of problem and our original plans for the analytic approach.
+1. Business Problem Statement<br/>
+Summary of problem and our original plans for the analytic approach.<br/>
 (Provided in .pdf format)
 
-2. EDA Notebook
-Exploratory data analysis, feature engineering, and cleaning of the data to create the dataset used for modeling.
+2. EDA Notebook<br/>
+Exploratory data analysis, feature engineering, and cleaning of the data to create the dataset used for modeling.<br/>
 (Provided in .html and .rmd formats)
 
-3. Modeling Notebook
+3. Modeling Notebook<br/>
 Initial approach looking for customer characteristics that correspond to growth. Attempted models are as follows:
 - Logistic Regression
 - Penalized Regression (Lasso and Ridge)
@@ -37,14 +37,14 @@ Initial approach looking for customer characteristics that correspond to growth.
 - DBSCAN Clustering (with Random Forest for variable contribution to clusters)
 (Provided in .pdf format only, due to a mix of R and python code)
 
-4. Additional Modeling Notebook 1
+4. Additional Modeling Notebook 1<br/>
 This notebook was created after pivot in approach. In the section of this notebook titled "Next Steps: Modeling for Sales Rep Impact", a T-learner was performed for HTE, followed by Random Forest and Lasso Regression models on the ITE values to determine which features correlated with high treatment effects.
 (Provided in .html and .ipynb formats)
 
-5. Additional Modeling Notebook 2
+5. Additional Modeling Notebook 2<br/>
 The section "Additional Exploration" explores the results found from initial modeling notebook. Following that, we pivoted to TE modeling, and matching and linear regression were paired to estimate ATE, then causal forest to estimate ITEs. The final section "Quantify Benefit from HTE T-learner Model" uses the data from "Additional Modeling Notebook 1" and includes the calculations for the Impact & Targeted Interventions presented in the slides.
 (Provided in .html and .rmd formats)
 
-6. Customer Optimization Presentation
-Slides as presented to SCC on 16 April 2025.
+6. Customer Optimization Presentation<br/>
+Slides as presented to SCC on 16 April 2025.<br/>
 (Provided in .pdf format)
