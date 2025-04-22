@@ -1,6 +1,3 @@
-# IS6813_Group_Capstone
-IS 6813 - Group Capstone - Spring 2025
-
 # Group 6 MSBA Capstone Project
 ## Summary of Approach & Recommendations
 
