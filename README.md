@@ -1,10 +1,9 @@
 # Group 6 MSBA Capstone Project
 ## Summary of Approach & Recommendations
 
-### Initial Approach: Growth Characteristics
+### Approach
 We first attempted supervised and unsupervised models to find provided or engineered features correlated with growth from 2023-2024.
 
-### Revised Approach: HTE Modeling
 With few and not strong results from the initial models, we changed our approach to explore an interesting finding that some frequent order types correlated with growth in sales and others with declining sales.
 
 We pivoted to looking at the data as an observational study where the "treatment" was certain frequent order types correlated with growth and the "control" was the other types. Since this is customer behavior, their choices that land them in the "treatment" vs "control" groups are subject to potential confounding bias.
