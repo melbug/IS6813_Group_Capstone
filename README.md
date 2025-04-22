@@ -27,7 +27,8 @@ Exploratory data analysis, feature engineering, and cleaning of the data to crea
 (Provided in .html and .rmd formats)
 
 3. Modeling Notebook<br/>
-Initial approach looking for customer characteristics that correspond to growth. Attempted models are as follows:
+Initial approach looking for customer characteristics that correspond to growth.<br/>
+Attempted models are as follows:
 - Logistic Regression
 - Penalized Regression (Lasso and Ridge)
 - XG Boost
