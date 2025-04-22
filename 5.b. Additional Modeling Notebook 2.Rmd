@@ -1,0 +1,1327 @@
+---
+title: "Additional Modeling Notebook for Swire Coca-Cola Project"
+author: "Jessica Kersey"
+date: "2025-04-13"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = F, warning = F)
+```
+
+# Introduction
+
+**Project Goal:** Identify characteristics of customers that order above a specific threshold annually to determine what might indicate "high growth potential" in customers below the threshold.
+
+**Business Problem Summary:** Swire Coca-Cola wants to optimize logistic transport costs by changing some direct delivery ("red truck") customers to a third-party delivery ("white truck"). They need to identify characteristics of customers which order greater than 400 gallons of product per year in order to determine which customers below this threshold might have "high growth potential". These "high growth potential" customers may exceed the 400 gallon threshold in the future if they continue with red truck delivery and business support services instead of being swapped to white truck.
+
+**Analytics Problem Summary:** Using historical sales data and customer characteristics, identify characteristics of customers which have high growth across the given 2023-2024 data. Few characteristics were identified, but they included customer behavior of frequent order type. Next, we investigate potential treatment effects by treating the data like an observational study using a "treatment" of frequent order type.
+
+**Notebook Purpose:** This notebook includes additional exploration of the results from the modeling notebook and treatment effect estimation using matching and causal forest modeling.
+
+<br>
+<br>
+
+# Get Data
+
+Load library packages
+
+```{r, results='hide'}
+#load library packages
+library(tidyverse) # for advanced stats including dplyr and ggplot
+library(skimr) # for advanced stats
+library(readxl) # for reading in xlsx file
+library(robustbase) # for outlier detection
+library(chemometrics) # for outlier detection
+library(car) # for VIF
+library(parallel) # for parallel processing
+library(rpart) #for classification tree model
+library(rpart.plot) #for plotting classification tree model
+library(gt) #for table formatting
+library(caret) # for dummy variables
+library(cluster) # for partition clustering
+library(factoextra) # for cluster plots
+library(kernlab) # for kernel clustering
+library(tictoc) # for timing
+library(ranger) # for fast random forest
+library(grf) # for causal forest
+```
+
+Load data
+
+```{r}
+# load customer profile
+cust_profile <- read.csv("customer_profile.csv")
+
+# load transactional data
+transactions <- read.csv("transactional_data.csv")
+
+# load group's final datasets
+complete_data <- read.csv("complete_data.csv")
+
+complete_data_subset <- read.csv("complete_data_subset.csv")
+```
+
+<br>
+
+# Cleaning and Processing
+
+I create a new copy of the datasets and start from scratch on cleaning and processing. This will give a whole dataset compared to the group's data where many customers were removed due to NAs.
+```{r}
+# create summary dataset of average ordered gallons
+cust_gallons <- transactions %>%
+  group_by(CUSTOMER_NUMBER) %>%    # aggregate by customer
+  summarise(total_gal = (sum(ORDERED_CASES) + sum(ORDERED_GALLONS)),
+            total_gal_2023 = (sum(ORDERED_CASES[YEAR == 2023]) + sum(ORDERED_GALLONS[YEAR == 2023])),
+            total_gal_2024 = (sum(ORDERED_CASES[YEAR == 2024]) + sum(ORDERED_GALLONS[YEAR == 2024])),
+            avg_gal_per_year = (total_gal_2023 + total_gal_2024)             # calculate total gallons
+                                /2,                                          # divide by 2 years
+            cases_total = sum(ORDERED_CASES),
+            fountain_total = sum(ORDERED_GALLONS)
+            ) %>%
+  mutate(threshold_400_gal = ifelse(avg_gal_per_year >= 400,
+                                    TRUE,            # if equal or above 400 gal, meets threshold
+                                    FALSE),          # if below 400 gal, does not meet threshold
+         percent_change = ((total_gal_2024 - total_gal_2023)/total_gal_2023) * 100,
+         fountain_only = ifelse(cases_total==0 & fountain_total >= 1,
+                                TRUE,        # True if no cases ordered and some fountain ordered
+                                FALSE)       # False otherwise
+         )
+
+# add the new data to the customer profile
+cust_profile_update <- merge(x = cust_profile,
+                             y = cust_gallons,
+                             by = "CUSTOMER_NUMBER",
+                             all.x = TRUE)
+
+# clean
+cust_profile_c <- cust_profile_update %>%
+  mutate(CUSTOMER_NUMBER = factor(CUSTOMER_NUMBER),
+         PRIMARY_GROUP_NUMBER = ifelse(is.na(PRIMARY_GROUP_NUMBER),  # then convert NAs to...
+                                         "NA",                       # ...a character factor level
+                                         PRIMARY_GROUP_NUMBER),
+         PRIMARY_GROUP_NUMBER = factor(PRIMARY_GROUP_NUMBER),        # then factor
+         FREQUENT_ORDER_TYPE = factor(FREQUENT_ORDER_TYPE),
+         FIRST_DELIVERY_DATE = as.Date(FIRST_DELIVERY_DATE, "%m/%d/%Y"),  # no leading zero on m,d; 4-digit year
+         ON_BOARDING_DATE = as.Date(ON_BOARDING_DATE, "%m/%d/%Y"),        # no leading zero on m,d; 4-digit year
+         COLD_DRINK_CHANNEL = factor(COLD_DRINK_CHANNEL),
+         TRADE_CHANNEL = factor(TRADE_CHANNEL),
+         SUB_TRADE_CHANNEL = factor(SUB_TRADE_CHANNEL),
+         total_gal = ifelse(is.na(total_gal),                       # convert NAs to...
+                                 0,                                 # ...0 gallons ordered
+                                 total_gal),
+         total_gal_2023 = ifelse(is.na(total_gal_2023),             # convert NAs to...
+                                 0,                                 # ...0 gallons ordered
+                                 total_gal_2023),
+         total_gal_2024 = ifelse(is.na(total_gal_2024),             # convert NAs to...
+                                 0,                                 # ...0 gallons ordered
+                                 total_gal_2024),        
+         avg_gal_per_year = ifelse(is.na(avg_gal_per_year),         # convert NAs to...
+                                   0,                               # ...0 gallons ordered
+                                   avg_gal_per_year),
+         threshold_400_gal = ifelse(is.na(threshold_400_gal),       # convert NAs to...
+                                    FALSE,                          # ...FALSE = below threshold
+                                    threshold_400_gal),
+         cases_total = ifelse(is.na(cases_total),                   # convert NAs to...
+                                    0,                              # ...0 gallons ordered
+                                    cases_total),
+         fountain_total = ifelse(is.na(fountain_total),             # convert NAs to...
+                                    0,                              # ...0 gallons ordered
+                                    fountain_total),
+         cases_total = ifelse(is.na(cases_total),                   # convert NAs to...
+                                    0,                              # ...0 gallons ordered
+                                    cases_total),
+         percent_change = ifelse(is.na(percent_change),             # convert NAs to...
+                                 0,                                 # ...0 percent change
+                                 percent_change),
+         percent_change = ifelse(is.infinite(percent_change),       # convert Inf to...
+                                 total_gal_2024,                    # ...2024 gal = percent change
+                                 percent_change),
+         fountain_only = ifelse(is.na(fountain_only),               # convert NAs to...
+                                FALSE,                              # ...FALSE = not fountain only
+                                fountain_only)
+  )
+
+# get subset
+cust_profile_subset <- cust_profile_c %>%
+  filter(LOCAL_MARKET_PARTNER == TRUE
+         & CO2_CUSTOMER == FALSE
+         & fountain_only == TRUE) %>%
+  select(-c(LOCAL_MARKET_PARTNER, CO2_CUSTOMER, fountain_only, cases_total))
+
+#rename
+profile_all_cleaned <- cust_profile_c
+profile_subset_cleaned <-cust_profile_subset
+```
+
+Save a copy for other groupmates to also use.
+```{r}
+write.csv(cust_profile_c, file = "profile_all_cleaned.csv", row.names = FALSE)
+write.csv(cust_profile_subset, file = "profile_subset_cleaned.csv", row.names = FALSE)
+```
+
+
+# Additional Exploration
+
+The trade channels and sub-trade channels that are explored here were correlated with high growth clusters found from Dan's DBSCAN clustering models. Instead of the reduced customer dataset, I look at the entire set of customers to see if the trends expand to all customers.
+
+<br>
+
+First, what is the Trade Channel `GENERAL`?
+```{r}
+# look at general
+cust_profile_c %>%
+  filter(TRADE_CHANNEL == "GENERAL") %>%
+  group_by(COLD_DRINK_CHANNEL, threshold_400_gal) %>%
+  summarize(avg_gal_per_year = mean(avg_gal_per_year),
+            avg_percent_growth = mean(percent_change),
+            count = n()) %>%
+  data.frame() %>%
+  gt()
+```
+
+Notably, the Trade Channel name `GENERAL` is duplicated across multiple Cold Drink Channels. Finding many customers in this Trade Channel in the high-growth clusters is likely due to chance or the model picking up on this accidental relationship.
+
+<br>
+
+Then, look at Trade Channel `OTHER DINING & BEVERAGE`.
+```{r}
+# look at other dining & beverage/other dining
+cust_profile_c %>%
+  filter(TRADE_CHANNEL == "OTHER DINING & BEVERAGE") %>%
+  group_by(SUB_TRADE_CHANNEL, LOCAL_MARKET_PARTNER, threshold_400_gal) %>%
+  summarize(avg_gal_per_year = mean(avg_gal_per_year),
+            avg_percent_growth = mean(percent_change),
+            count = n()) %>%
+  data.frame() %>%
+  gt()
+```
+
+The Trade Channel `OTHER DINING & BEVERAGE` is all within the same Cold Drink Channel, and the same Sub-trade Channel. Notably, the customers over the 400 gallon threshold have high average orders. Local Market Partners have lower average gallons per year and lower average percent growth than the overall averages.
+
+<br>
+
+Next, Trade Channel `VEHICLE CARE`.
+```{r}
+# look at vehicle care
+cust_profile_c %>%
+  filter(TRADE_CHANNEL == "VEHICLE CARE") %>%
+  group_by(SUB_TRADE_CHANNEL, threshold_400_gal, LOCAL_MARKET_PARTNER) %>%
+  summarize(avg_gal_per_year = mean(avg_gal_per_year),
+            avg_percent_growth = mean(percent_change),
+            count = n()) %>%
+  data.frame() %>%
+  gt()
+```
+
+All of the Trade Channel `VEHICLE CARE` is in the same Cold Drink Channel and Sub-trade Channel. Interestingly, the Local Market Partners in this group had positive growth, while the overall average growth was negative.
+
+<br>
+
+Look at how many customers fall into one of the high-growth-associated characteristics. If we recommend keeping customers on red truck that would normally qualify for a swap to white truck, how many would we keep?
+```{r}
+# filtered by TC, STC, "Other"
+below_400_filtered <- cust_profile_c %>%
+  filter(TRADE_CHANNEL == "GENERAL" |
+         TRADE_CHANNEL == "VEHICLE CARE" |
+         TRADE_CHANNEL == "OUTDOOR ACTIVITIES" |
+         TRADE_CHANNEL == "OTHER DINING & BEVERAGE" |
+         SUB_TRADE_CHANNEL == "OTHER DINING" 
+         ) %>%
+  group_by(COLD_DRINK_CHANNEL, TRADE_CHANNEL, SUB_TRADE_CHANNEL, threshold_400_gal) %>%
+  summarize(count = n()) %>%
+  filter(threshold_400_gal == FALSE) %>%
+  print()
+
+# total customers
+sum(below_400_filtered$count)
+```
+
+A recommendation to consider customers in these categories for retention on red truck would affect 6183 customers.
+
+<br>
+
+# Matching for Treatment Effect Estimation
+
+Matching similar customers allows for better estimation of treatment effects in observational studies as it removes potential selection bias when assignment to the "treatment" versus "control" conditions are not random. Instead of a true controlled study where customers might be randomly assigned, matching is performed before statistical analysis to remove bias in the potentially-confounding covariate features.
+
+As customers choose which way to order from Swire Coca-Cola, this is not random assignment and there may be confounding variables that affect their growth rather than the order type. I will try matching, then model average treatment effect a few ways.
+
+## Prep for Matching
+
+Load packages
+```{r}
+library(MatchIt)
+library(marginaleffects)
+library(nnet)
+```
+
+First, create a naive linear regression model.
+```{r}
+naive_lr_model <- cust_profile_subset %>%
+  lm(formula = percent_change ~ FREQUENT_ORDER_TYPE)
+
+summary(naive_lr_model)
+```
+
+The Frequent Order Type of EDI is the base level. `MYCOKE360` appears to be the greatest improvement on that baseline, with `SALES REP` second, and `MYCOKE LEGACY` and `OTHER` as worse. However, this model isn't taking into account any of the other features.
+
+<br>
+
+## Matching Using Propensity Score weighting
+
+Matching using propensity score weighting with subset customers: with Frequent Order Type `MYCOKE360` as the treatment and `MYCOKE LEGACY` as the control.
+```{r}
+# specify parallel processing
+doParallel::registerDoParallel(cores = 24)
+
+# 1. Create MatchIt object using propensity scores
+matched_full <- cust_profile_subset %>%
+  filter(FREQUENT_ORDER_TYPE == "MYCOKE LEGACY" | FREQUENT_ORDER_TYPE == "MYCOKE360") %>%
+  select(-c(CUSTOMER_NUMBER)) %>%
+  mutate(FREQUENT_ORDER_TYPE = ifelse(FREQUENT_ORDER_TYPE == "MYCOKE LEGACY",
+                                      0,      # MyCoke Legacy = 0, control
+                                      1)      # MyCoke 360 = 1, treatment
+         ) %>%
+  matchit(formula = FREQUENT_ORDER_TYPE ~ PRIMARY_GROUP_NUMBER + FIRST_DELIVERY_DATE
+     + ON_BOARDING_DATE + COLD_DRINK_CHANNEL + TRADE_CHANNEL + SUB_TRADE_CHANNEL
+     + ZIP_CODE + total_gal_2023 + total_gal_2024 + avg_gal_per_year + fountain_total
+     + threshold_400_gal + total_gal,
+                        distance = "glm",
+                        method = "full")                      # full matching
+
+# 2. Evaluate balance
+summary(matched_full)
+
+# 3. Create matched data
+matched_data <- match.data(matched_full)
+
+# 4. Do analysis using weights added to matched data
+lr_model_subset <- matched_data %>%
+  lm(formula = percent_change ~ FREQUENT_ORDER_TYPE + PRIMARY_GROUP_NUMBER + FIRST_DELIVERY_DATE
+     + ON_BOARDING_DATE + COLD_DRINK_CHANNEL + TRADE_CHANNEL + SUB_TRADE_CHANNEL
+     + ZIP_CODE + total_gal_2023 + total_gal_2024 + avg_gal_per_year + fountain_total
+     + threshold_400_gal + total_gal,
+     weights = weights) %>%
+  summary()
+
+lr_model_subset
+
+# stop parallel processing
+doParallel::stopImplicitCluster()
+```
+
+The coefficient for the Frequent Order Type is -23.4, indicating that for the subset of Local Market Partners who order fountain drinks only and no CO2 dataset, customers with the "treatment" of `MYCOKE360` have less growth than the "control" customers using `MYCOKE LEGACY`.
+
+<br>
+
+Next, try using the marginal effects package to find the treatment effect.
+```{r}
+# specify parallel processing
+doParallel::registerDoParallel(cores = 24)
+
+# 1. fit a model with interactions
+lr_model_subset_int <- matched_data %>%
+  lm(formula = percent_change ~ FREQUENT_ORDER_TYPE * (PRIMARY_GROUP_NUMBER
+      + FIRST_DELIVERY_DATE + ON_BOARDING_DATE + COLD_DRINK_CHANNEL + TRADE_CHANNEL
+      + SUB_TRADE_CHANNEL + ZIP_CODE + total_gal_2023 + total_gal_2024
+      + avg_gal_per_year + fountain_total + threshold_400_gal + total_gal),
+     weights = weights)
+
+#2. use marginal effects package to find treatment effect
+avg_comparisons(lr_model_subset_int,
+                variables = "FREQUENT_ORDER_TYPE",
+                vcov = ~subClass,                     # clustered standard errors
+                wts = "weights")
+
+# stop parallel processing
+doParallel::stopImplicitCluster()
+```
+
+The marginal effects package is expected to have more accurate estimate of treatment effect. The average comparison function yielded an estimate of -61.1, also negative like the previous model, but a higher magnitude. 
+
+<br>
+
+Do the same matching using propensity score weighting analysis, this time for whole dataset.
+```{r}
+# specify parallel processing
+doParallel::registerDoParallel(cores = 24)
+
+# 1. Create MatchIt object using propensity scores
+matched_full_all <- cust_profile_c %>%
+  filter(FREQUENT_ORDER_TYPE == "MYCOKE LEGACY" | FREQUENT_ORDER_TYPE == "MYCOKE360") %>%
+  select(-c(CUSTOMER_NUMBER)) %>%
+  mutate(FREQUENT_ORDER_TYPE = ifelse(FREQUENT_ORDER_TYPE == "MYCOKE LEGACY",
+                                      0,      # MyCoke Legacy = 0, control
+                                      1)      # MyCoke 360 = 1, treatment
+         ) %>%
+  matchit(formula = FREQUENT_ORDER_TYPE ~ PRIMARY_GROUP_NUMBER + FIRST_DELIVERY_DATE
+     + ON_BOARDING_DATE + COLD_DRINK_CHANNEL + TRADE_CHANNEL + SUB_TRADE_CHANNEL
+     + ZIP_CODE + total_gal_2023 + total_gal_2024 + avg_gal_per_year + fountain_total
+     + cases_total + threshold_400_gal + total_gal + LOCAL_MARKET_PARTNER + CO2_CUSTOMER
+     + fountain_only,
+                        distance = "glm",
+                        method = "full")                      # full matching
+
+# 2. Evaluate balance
+summary(matched_full_all)
+
+# 3. Create matched data
+matched_data_all <- match.data(matched_full_all)
+
+# 4. Do analysis using weights added to matched data
+lr_model_all <- matched_data_all %>%
+  lm(formula = percent_change ~ FREQUENT_ORDER_TYPE + PRIMARY_GROUP_NUMBER
+     + FIRST_DELIVERY_DATE + ON_BOARDING_DATE + COLD_DRINK_CHANNEL + TRADE_CHANNEL
+     + SUB_TRADE_CHANNEL + ZIP_CODE + total_gal_2023 + total_gal_2024
+     + avg_gal_per_year + fountain_total + cases_total + threshold_400_gal
+     + total_gal + LOCAL_MARKET_PARTNER + CO2_CUSTOMER + fountain_only,
+     weights = weights) %>%
+  summary()
+
+lr_model_all
+
+# stop parallel processing
+doParallel::stopImplicitCluster()
+```
+
+The coefficient for the Frequent Order Type is 52.2, indicating that for the entire customer dataset, on average, customers with the "treatment" of `MYCOKE360` have 52.2 percentage points higher growth rate from 2023-2024 than did the "control" customers using `MYCOKE LEGACY`.
+
+<br>
+
+Try using the marginal effects package to find the treatment effect, now on the whole dataset.
+```{r}
+# specify parallel processing
+doParallel::registerDoParallel(cores = 24)
+
+# 1. fit a model with interactions
+lr_model_all_int <- matched_data_all %>%
+  lm(formula = percent_change ~ FREQUENT_ORDER_TYPE * (PRIMARY_GROUP_NUMBER
+      + FIRST_DELIVERY_DATE + ON_BOARDING_DATE + COLD_DRINK_CHANNEL + TRADE_CHANNEL
+      + SUB_TRADE_CHANNEL + ZIP_CODE + total_gal_2023 + total_gal_2024
+      + avg_gal_per_year + fountain_total + cases_total + threshold_400_gal
+      + total_gal + LOCAL_MARKET_PARTNER + CO2_CUSTOMER + fountain_only),
+     weights = weights)
+
+#2. use marginal effects package to find treatment effect
+avg_comparisons(lr_model_all_int,
+                variables = "FREQUENT_ORDER_TYPE",
+                vcov = ~subClass,                     # clustered standard errors
+                wts = "weights")
+
+# stop parallel processing
+doParallel::stopImplicitCluster()
+```
+
+With an estimate of 25.3, the marginal effects average comparisons function found a smaller treatment effect between customers using the different MYCOKE platforms than the previous model, but still a positive effect of about 25 percentage points higher.
+
+<br>
+
+# Causal Forest Modeling
+
+Causal Forest modeling allows for estimation of heterogenous treatment effects, or treatment effects for individuals or sub-groups rather than a single average effect across the sample. This is an adaptation of Random Forest modeling, but instead of prediction, it performs causal analysis. Similar to matching, causal forest separates the "treatment assignment" and outcome into different steps to counter any selection bias. The trees are trained on the residuals of the outcomes and splits are chosen based on treatment effect, not on the target variable.
+
+<br>
+
+The outcome variable will be average gallons per year. The "treatment" variable must be binary, so the "treatment" group will be customers with the Frequent Order Type of `SALES REP` and the "control" is all other ordering types except for EDI, as it is unlikely customers would change from an automated to manual ordering system.
+
+<br>
+
+## Preparation for Modeling
+
+### Check imbalance
+
+Look at frequent order type percentages to see if imbalanced on `SALES REP` vs all other order types.
+```{r}
+# whole dataset
+profile_all_cleaned %>%
+  group_by(FREQUENT_ORDER_TYPE) %>%
+  summarize(count = n()) %>%
+  ungroup() %>%
+  mutate(percent = count/sum(count)*100)
+
+# subset dataset
+profile_subset_cleaned %>%
+  group_by(FREQUENT_ORDER_TYPE) %>%
+  summarize(count = n()) %>%
+  ungroup() %>%
+  mutate(percent = count/sum(count)*100)
+```
+
+It is only about 63-66% of dataset, so this is a minor imbalance. Also, the EDI customers in the whole dataset only make up 1%, so their removal will not cause further imbalance.
+
+<br>
+
+### Convert T/F to binary and factors to dummy variables
+
+Adjust dataset to prepare for causal forest treatment effect modeling. Turn categorical variables into dummy variables. The outcome will be avg_gal_per_year, which will be correlated with total_gal, total_gal_2023, total_gal_2024, and threshold_400_gal. These correlated variables will be removed. Also, convert FREQUENT_ORDER_TYPE to a binary for treatment (0 = other, 1 = Sales Rep).
+
+<br>
+
+Prepare the whole dataset first.
+```{r}
+# prepare whole dataset first
+pc_all <- profile_all_cleaned %>%
+  # manually change T/F to binary
+  mutate(chain = ifelse(PRIMARY_GROUP_NUMBER == "NA",
+                        0,
+                        1),
+         LOCAL_MARKET_PARTNER = ifelse(LOCAL_MARKET_PARTNER == TRUE,
+                                       1,
+                                       0),
+         CO2_CUSTOMER = ifelse(CO2_CUSTOMER == TRUE,
+                               1,
+                               0),
+         threshold_400_gal = ifelse(threshold_400_gal == TRUE,
+                                    1,
+                                    0),
+         fountain_only = ifelse(fountain_only == TRUE,
+                                1,
+                                0),
+         days_since_first_del = difftime(today(),    # later date
+                                         FIRST_DELIVERY_DATE,       # earlier date
+                                         units = "days"),         # result in count of days
+         days_since_first_del = as.numeric(days_since_first_del),
+         days_since_onboard = difftime(today(),    # later date
+                                       ON_BOARDING_DATE,       # earlier date
+                                       units = "days"),         # result in count of days
+         days_since_onboard = as.numeric(days_since_onboard),
+         ) %>%
+  select(-c(PRIMARY_GROUP_NUMBER, ON_BOARDING_DATE, FIRST_DELIVERY_DATE,
+            SUB_TRADE_CHANNEL))  # previous analyses indicated this is not an important feature
+  
+
+# extract cols which will not be turned into dummy
+pc_all_non_dummy <- pc_all %>%
+  select(-c(FREQUENT_ORDER_TYPE, COLD_DRINK_CHANNEL, TRADE_CHANNEL))
+
+# convert to dummy
+pc_all_dummy <- pc_all %>%
+  # convert factors to dummy variables by recoding categorical into dummy variables
+  dummyVars(data = ., formula = ~FREQUENT_ORDER_TYPE + COLD_DRINK_CHANNEL
+            + TRADE_CHANNEL) %>%
+  # apply dummy variables model
+  predict(object = .,
+          newdata = pc_all)
+
+# combine non-dummy and dummy cols into new dataframe
+pc_all_combined <- cbind(pc_all_non_dummy, pc_all_dummy)
+
+# now do additional conversions
+cf_data_all <- pc_all_combined %>%
+  # remove rows with EDI as frequent order type
+  filter(FREQUENT_ORDER_TYPE.EDI == 0) %>%        
+  # remove cols due to multicolinearity or no variation
+  select(-c(total_gal_2023, total_gal_2024, threshold_400_gal, total_gal,   # multicolinear
+            FREQUENT_ORDER_TYPE.EDI)                             # no variation
+         ) %>%
+  # mutate sales rep to treatment
+  mutate(treatment = `FREQUENT_ORDER_TYPE.SALES REP`) %>%
+  select(-`FREQUENT_ORDER_TYPE.SALES REP`)
+```
+
+Next, the subset datset.
+```{r}
+# prepare subset dataset
+pc_subset <- profile_subset_cleaned %>%
+  # manually change T/F to binary
+  mutate(chain = ifelse(PRIMARY_GROUP_NUMBER == "NA",
+                        0,
+                        1),
+         threshold_400_gal = ifelse(threshold_400_gal == TRUE,
+                                    1,
+                                    0),
+
+         days_since_first_del = difftime(today(),    # later date
+                                         FIRST_DELIVERY_DATE,       # earlier date
+                                         units = "days"),         # result in count of days
+         days_since_first_del = as.numeric(days_since_first_del),
+         days_since_onboard = difftime(today(),    # later date
+                                       ON_BOARDING_DATE,       # earlier date
+                                       units = "days"),         # result in count of days
+         days_since_onboard = as.numeric(days_since_onboard),
+         ) %>%
+  select(-c(PRIMARY_GROUP_NUMBER, ON_BOARDING_DATE, FIRST_DELIVERY_DATE,
+            SUB_TRADE_CHANNEL))  # previous analyses indicated this is not an important
+  
+
+# extract cols which will not be turned into dummy
+pc_subset_non_dummy <- pc_subset %>%
+  select(-c(FREQUENT_ORDER_TYPE, COLD_DRINK_CHANNEL, TRADE_CHANNEL))
+
+# convert to dummy
+pc_subset_dummy <- pc_subset %>%
+  # convert factors to dummy variables by recoding categorical into dummy variables
+  dummyVars(data = ., formula = ~FREQUENT_ORDER_TYPE + COLD_DRINK_CHANNEL
+            + TRADE_CHANNEL) %>%
+  # apply dummy variables model
+  predict(object = .,
+          newdata = pc_subset)
+
+# combine non-dummy and dummy cols into new dataframe
+pc_subset_combined <- cbind(pc_subset_non_dummy, pc_subset_dummy)
+
+# now do additional conversions
+cf_data_subset <- pc_subset_combined %>%
+  # remove rows with EDI as frequent order type
+  filter(FREQUENT_ORDER_TYPE.EDI == 0) %>%        
+  # remove cols due to multicolinearity or no variation
+  select(-c(total_gal_2023, total_gal_2024, threshold_400_gal, total_gal,  # multicolinear
+            FREQUENT_ORDER_TYPE.EDI)                             # no variation
+         ) %>%
+  # mutate sales rep to treatment
+  mutate(treatment = `FREQUENT_ORDER_TYPE.SALES REP`) %>%
+  select(-`FREQUENT_ORDER_TYPE.SALES REP`)
+```
+
+<br>
+
+### Create below-threshold versions
+
+Now take the two datasets and make below-threshold versions
+```{r}
+# whole population, below threshold
+cf_data_all_below <- cf_data_all %>%
+  filter(avg_gal_per_year < 400)
+
+# subset, below threshold
+cf_data_subset_below <- cf_data_subset %>%
+  filter(avg_gal_per_year < 400)
+```
+
+<br>
+
+### Prepare for Causal Forest
+
+Extract customer number and treatment columns for all 4 datasets.
+```{r}
+# extract customer numbers from complete datasets
+cn_all <- cf_data_all$CUSTOMER_NUMBER
+cn_all_below <- cf_data_all_below$CUSTOMER_NUMBER
+cn_subset <-cf_data_subset$CUSTOMER_NUMBER
+cn_subset_below <- cf_data_subset_below$CUSTOMER_NUMBER
+
+# extract treatment from complete datasets
+t_all <- cf_data_all$treatment
+t_all_below <- cf_data_all_below$treatment
+t_subset <- cf_data_subset$treatment
+t_subset_below <- cf_data_subset_below$treatment
+```
+
+For all 4 datasets, get some population data for back-transforming standardized numeric values after scaling.
+```{r}
+# whole population
+all_mean <- mean(cf_data_all$avg_gal_per_year)
+all_stdev <- sd(cf_data_all$avg_gal_per_year)
+
+# whole population, below threshold
+all_mean_below <- mean(cf_data_all_below$avg_gal_per_year)
+all_stdev_below <- sd(cf_data_all_below$avg_gal_per_year)
+
+# subset
+subset_mean <- mean(cf_data_subset$avg_gal_per_year)
+subset_stdev <- sd(cf_data_subset$avg_gal_per_year)
+
+# subset, below threshold
+subset_mean_below <- mean(cf_data_subset_below$avg_gal_per_year)
+subset_stdev_below <- sd(cf_data_subset_below$avg_gal_per_year)
+```
+
+Scale all 4 datasets and re-combine with the customer number and treatment columns.
+```{r}
+# scale all
+cf_data_all_s <- cf_data_all %>%
+  select(-c(CUSTOMER_NUMBER, treatment)) %>%
+  scale(x = .,
+        scale = TRUE,
+        center = TRUE) %>%
+  as.data.frame() %>%
+  cbind(cn_all, t_all, .) %>%
+  rename(CUSTOMER_NUMBER = cn_all,
+         treatment = t_all)
+
+# scale all, below threshold
+cf_data_all_below_s <- cf_data_all_below %>%
+  select(-c(CUSTOMER_NUMBER, treatment)) %>%
+  scale(x = .,
+        scale = TRUE,
+        center = TRUE) %>%
+  as.data.frame() %>%
+  cbind(cn_all_below, t_all_below, .) %>%
+  rename(CUSTOMER_NUMBER = cn_all_below,
+         treatment = t_all_below)
+
+# scale subset
+cf_data_subset_s <- cf_data_subset %>%
+  select(-c(CUSTOMER_NUMBER, treatment)) %>%
+  scale(x = .,
+        scale = TRUE,
+        center = TRUE) %>%
+  as.data.frame() %>%
+  cbind(cn_subset, t_subset, .) %>%
+  rename(CUSTOMER_NUMBER = cn_subset,
+         treatment = t_subset) %>%
+  select(-c(COLD_DRINK_CHANNEL.CONVENTIONAL,`TRADE_CHANNEL.LARGE-SCALE RETAILER`, `TRADE_CHANNEL.PHARMACY RETAILER`, TRADE_CHANNEL.SUPERSTORE))
+
+# scale subset, below threshold
+cf_data_subset_below_s <- cf_data_subset_below %>%
+  select(-c(CUSTOMER_NUMBER, treatment)) %>%
+  scale(x = .,
+        scale = TRUE,
+        center = TRUE) %>%
+  as.data.frame() %>%
+  cbind(cn_subset_below, t_subset_below, .) %>%
+  rename(CUSTOMER_NUMBER = cn_subset_below,
+         treatment = t_subset_below) %>%
+  select(-c(COLD_DRINK_CHANNEL.CONVENTIONAL,`TRADE_CHANNEL.LARGE-SCALE RETAILER`, `TRADE_CHANNEL.PHARMACY RETAILER`, TRADE_CHANNEL.SUPERSTORE))
+```
+
+<br>
+
+### Create Train & Test Sets for Cross-Validation
+
+Create a train and test set for each of the 4 datasets (whole population, whole population below threshold, subset, and subset below threshold).
+```{r}
+set.seed(25463)
+
+# whole population
+trainIndex1 <- createDataPartition(cf_data_all_s$treatment, p = 0.8, list = FALSE)
+cf_data_all_train <- cf_data_all_s[trainIndex1, ]
+cf_data_all_test <- cf_data_all_s[-trainIndex1, ]
+
+# whole population, below threshold
+trainIndex2 <- createDataPartition(cf_data_all_below_s$treatment, p = 0.8, list = FALSE)
+cf_data_all_b_train <- cf_data_all_below_s[trainIndex2, ]
+cf_data_all_b_test <- cf_data_all_below_s[-trainIndex2, ]
+
+# subset
+trainIndex3 <- createDataPartition(cf_data_subset_s$treatment, p = 0.8, list = FALSE)
+cf_data_subset_train <- cf_data_subset_s[trainIndex3, ]
+cf_data_subset_test <- cf_data_subset_s[-trainIndex3, ]
+
+# subset, below threshold
+trainIndex4 <- createDataPartition(cf_data_subset_below_s$treatment, p = 0.8, list = FALSE)
+cf_data_subset_b_train <- cf_data_subset_below_s[trainIndex4, ]
+cf_data_subset_b_test <- cf_data_subset_below_s[-trainIndex4, ]
+```
+
+<br>
+
+## Causal Forest Modeling
+
+### Subset Customers
+
+Causal forest on subset dataset with avg gal per year as outcome.
+```{r}
+# specify parallel processing
+doParallel::registerDoParallel(cores = 24)
+
+# set seed
+set.seed(25463)
+
+# run causal forest on whole dataset train data
+cf_sub_cv <- causal_forest(X = select(cf_data_subset_train,
+                                   -c(CUSTOMER_NUMBER, treatment, avg_gal_per_year)
+                                   ),
+                        Y = cf_data_subset_train$avg_gal_per_year,
+                        W = cf_data_subset_train$treatment,
+                        seed = 25463)
+
+# predict on the test data
+predictions_sub_cv <- predict(cf_sub_cv, select(cf_data_subset_test,
+                                                -c(CUSTOMER_NUMBER, treatment, avg_gal_per_year)
+                                                )
+                              )$predictions
+
+# calculate performance metrics of cross-validated model
+# RMSE
+rmse <- (cf_data_subset_test$avg_gal_per_year - predictions_sub_cv)^2 %>%
+  mean() %>%
+  sqrt()
+print(paste("Root Mean Squared Error on validation set:", rmse))
+
+# R-squared
+tss <- (mean(cf_data_subset_test$avg_gal_per_year)        # total sum of squares
+        - cf_data_subset_test$avg_gal_per_year)^2 %>% sum()    
+rss <- (predictions_sub_cv                           # residual sum of squares
+        - cf_data_subset_test$avg_gal_per_year)^2 %>% sum()    
+r_squared <- 1 - (rss / tss)
+print(paste("R-squared on validation set:", r_squared))
+
+
+# causal forest on whole dataset
+cf_subset <- causal_forest(X = select(cf_data_subset_s,
+                                   -c(CUSTOMER_NUMBER, treatment, avg_gal_per_year)
+                                   ),
+                        Y = cf_data_subset_s$avg_gal_per_year,
+                        W = cf_data_subset_s$treatment,
+                        seed = 25463)
+
+# get ITEs
+cf_subset_ITE <- predict(cf_subset)$predictions
+
+# combine ITEs with customer numbers
+cf_result_subset <- data.frame(cn_subset, cf_subset_ITE) %>%
+  mutate(cf_subset_ITE = cf_subset_ITE * subset_stdev + subset_mean) %>%
+  rename(CUSTOMER_NUMBER = cn_subset,
+         ITE_avg_gal_per_year = cf_subset_ITE) %>%
+  arrange(desc(ITE_avg_gal_per_year))
+
+# print ITE & ATE
+head(cf_result_subset, 10)
+average_treatment_effect(cf_subset, target.sample = "control") * subset_stdev + subset_mean
+
+# variable importance
+importance <- variable_importance(cf_subset)
+names <- cf_data_subset_s %>%
+  select(-c(CUSTOMER_NUMBER, treatment, avg_gal_per_year)) %>%
+  colnames()
+cf_subset_imp <- data.frame(feature = names, importance) %>%
+  arrange(desc(importance))
+cf_subset_imp
+
+# stop parallel processing
+doParallel::stopImplicitCluster()
+```
+
+Results:
+
+- Root Mean Squared Error is 1.12 (in the standardized scale).
+- R-squared is -0.09, which means it's worse than just estimating the mean value.
+- ATE is 260 average gallons per year average for control customers (not already sales rep).
+- Top 5 customers have an ITE of 637+ avg gallons per year.
+- Most important features: fountain_total, percent_change, and ZIP_CODE.
+
+<br>
+
+### Subset Customers under 400 gal avg per year
+
+Causal forest on subset dataset, but only below 400 gal threshold, with avg gal per year as outcome.
+```{r}
+# specify parallel processing
+doParallel::registerDoParallel(cores = 24)
+
+# set seed
+set.seed(25463)
+
+# run causal forest on whole dataset train data
+cf_sub_b_cv <- causal_forest(X = select(cf_data_subset_b_train,
+                                   -c(CUSTOMER_NUMBER, treatment, avg_gal_per_year)
+                                   ),
+                        Y = cf_data_subset_b_train$avg_gal_per_year,
+                        W = cf_data_subset_b_train$treatment,
+                        seed = 25463)
+
+# predict on the test data
+predictions_sub_b_cv <- predict(cf_sub_b_cv, select(cf_data_subset_b_test,
+                                         -c(CUSTOMER_NUMBER, treatment, avg_gal_per_year)
+                                         )
+                       )$predictions
+
+# calculate performance metrics of cross-validated model
+# RMSE
+rmse <- (cf_data_subset_b_test$avg_gal_per_year - predictions_sub_b_cv)^2 %>%
+  mean() %>%
+  sqrt()
+print(paste("Root Mean Squared Error on validation set:", rmse))
+
+# R-squared
+tss <- (mean(cf_data_subset_b_test$avg_gal_per_year)             # total sum of squares
+            - cf_data_subset_b_test$avg_gal_per_year)^2 %>% sum()
+rss <- (predictions_sub_b_cv                                     # residual sum of squares
+            - cf_data_subset_b_test$avg_gal_per_year)^2 %>% sum()
+r_squared <- 1 - (rss / tss)
+print(paste("R-squared on validation set:", r_squared))
+
+# causal forest on whole dataset
+cf_subset_below <- causal_forest(X = select(cf_data_subset_below_s,
+                           -c(CUSTOMER_NUMBER, treatment, avg_gal_per_year)
+                           ),
+                        Y = cf_data_subset_below_s$avg_gal_per_year,
+                        W = cf_data_subset_below_s$treatment,
+                        seed = 25463)
+
+# get ITEs
+cf_subset_below_ITE <- predict(cf_subset_below)$predictions
+
+# combine ITEs with customer numbers
+cf_result_subset_below <- data.frame(cn_subset_below, cf_subset_below_ITE) %>%
+  mutate(cf_subset_below_ITE = cf_subset_below_ITE * subset_stdev_below + subset_mean_below) %>%
+  rename(CUSTOMER_NUMBER = cn_subset_below,
+         ITE_avg_gal_per_year = cf_subset_below_ITE) %>%
+  arrange(desc(ITE_avg_gal_per_year))
+
+# print ITE & ATE
+head(cf_result_subset_below, 10)
+average_treatment_effect(cf_subset_below, target.sample = "control") * subset_stdev_below + subset_mean_below
+
+# variable importance
+importance <- variable_importance(cf_subset_below)
+names <- cf_data_subset_below_s %>%
+  select(-c(CUSTOMER_NUMBER, treatment, avg_gal_per_year)) %>%
+  colnames()
+cf_subset_below_imp <- data.frame(feature = names, importance) %>%
+  arrange(desc(importance))
+cf_subset_below_imp
+
+# stop parallel processing
+doParallel::stopImplicitCluster()
+```
+
+Results:
+
+- Root Mean Squared Error is 1.06 (in the standardized scale).
+- R-squared is 0.05, which means it's almost as bad as estimating the mean value.
+- ATE is 106 average gallons per year average for control customers (not already sales rep).
+- Top 10 customers have an ITE of 113+ avg gallons per year.
+- Most important features: fountain_total, percent_change, and ZIP_CODE.
+
+<br>
+
+### All Customers
+
+Causal forest on whole dataset with avg_gal_per_year as outcome, with single cross-validation to get model metrics.
+```{r}
+# specify parallel processing
+doParallel::registerDoParallel(cores = 24)
+
+# set seed
+set.seed(25463)
+
+# run causal forest on whole dataset train data
+cf_all_cv <- causal_forest(X = select(cf_data_all_train,
+                                   -c(CUSTOMER_NUMBER, treatment, avg_gal_per_year)
+                                   ),
+                        Y = cf_data_all_train$avg_gal_per_year,
+                        W = cf_data_all_train$treatment,
+                        seed = 25463)
+
+# predict on the test data
+predictions_all_cv <- predict(cf_all_cv, select(cf_data_all_test,
+                                         -c(CUSTOMER_NUMBER, treatment, avg_gal_per_year)
+                                         )
+                       )$predictions
+
+# calculate performance metrics of cross-validated model
+# RMSE
+rmse <- (cf_data_all_test$avg_gal_per_year - predictions_all_cv)^2 %>%
+  mean() %>%
+  sqrt()
+print(paste("Root Mean Squared Error on validation set:", rmse))
+
+# R-squared
+tss <- (mean(cf_data_all_test$avg_gal_per_year)        # total sum of squares
+        - cf_data_all_test$avg_gal_per_year)^2 %>% sum()    
+rss <- (predictions_all_cv                           # residual sum of squares
+        - cf_data_all_test$avg_gal_per_year)^2 %>% sum()    
+r_squared <- 1 - (rss / tss)
+print(paste("R-squared on validation set:", r_squared))
+
+
+# run causal forest on the whole dataset
+cf_all <- causal_forest(X = select(cf_data_all_s,
+                                   -c(CUSTOMER_NUMBER, treatment, avg_gal_per_year)
+                                   ),
+                        Y = cf_data_all_s$avg_gal_per_year,
+                        W = cf_data_all_s$treatment,
+                        seed = 25463)
+
+# get ITEs
+cf_all_ITE <- predict(cf_all)$predictions
+
+# combine ITEs with customer numbers
+cf_result_all <- data.frame(cn_all, cf_all_ITE) %>%
+  mutate(cf_all_ITE = cf_all_ITE * all_stdev + all_mean) %>%
+  rename(CUSTOMER_NUMBER = cn_all,
+         ITE_avg_gal_per_year = cf_all_ITE) %>%
+  arrange(desc(ITE_avg_gal_per_year))
+
+# print ITE & ATE
+head(cf_result_all, 10)
+average_treatment_effect(cf_all, target.sample = "control") * all_stdev + all_mean
+
+# variable importance
+importance <- variable_importance(cf_all)
+names <- cf_data_all_s %>%
+  select(-c(CUSTOMER_NUMBER, treatment, avg_gal_per_year)) %>%
+  colnames()
+cf_all_imp <- data.frame(feature = names, importance) %>%
+  arrange(desc(importance))
+cf_all_imp
+
+# stop parallel processing
+doParallel::stopImplicitCluster()
+```
+
+Results:
+
+- Root Mean Squared Error is 0.83 (in the standardized scale).
+- R-squared is -1.22, which should be impossible... Perhaps this odd value is due to the standardized scale.
+- ATE is 416 average gallons per year average for control customers (not already sales rep).
+- Top 10 customers have an ITE of more than +1677 avg gallons per year.
+- Most important features: FREQUENT_ORDER_TYPE of MYCOKE LEGACY, cases_total, and ZIP_CODE.
+
+<br>
+
+### All Customers under 400 gal avg per year
+
+Causal forest on whole dataset, but only those below 400 threshold, with avg_gal_per_year as outcome.
+```{r}
+# specify parallel processing
+doParallel::registerDoParallel(cores = 24)
+
+# set seed
+set.seed(25463)
+
+# run causal forest on whole dataset train data
+cf_all_b_cv <- causal_forest(X = select(cf_data_all_b_train,
+                                   -c(CUSTOMER_NUMBER, treatment, avg_gal_per_year)
+                                   ),
+                        Y = cf_data_all_b_train$avg_gal_per_year,
+                        W = cf_data_all_b_train$treatment,
+                        seed = 25463)
+
+# predict on the test data
+predictions_all_b_cv <- predict(cf_all_b_cv, select(cf_data_all_b_test,
+                                         -c(CUSTOMER_NUMBER, treatment, avg_gal_per_year)
+                                         )
+                       )$predictions
+
+# calculate performance metrics of cross-validated model
+# RMSE
+rmse <- (cf_data_all_b_test$avg_gal_per_year - predictions_all_b_cv)^2 %>%
+  mean() %>%
+  sqrt()
+print(paste("Root Mean Squared Error on validation set:", rmse))
+
+# R-squared
+tss <- (mean(cf_data_all_b_test$avg_gal_per_year)             # total sum of squares
+            - cf_data_all_b_test$avg_gal_per_year)^2 %>% sum()
+rss <- (predictions_all_b_cv                                     # residual sum of squares
+            - cf_data_all_b_test$avg_gal_per_year)^2 %>% sum()
+r_squared <- 1 - (rss / tss)
+print(paste("R-squared on validation set:", r_squared))
+
+# run causal forest on the whole dataset
+cf_all_below <- causal_forest(X = select(cf_data_all_below_s,
+                                   -c(CUSTOMER_NUMBER, treatment, avg_gal_per_year)
+                                   ),
+                        Y = cf_data_all_below_s$avg_gal_per_year,
+                        W = cf_data_all_below_s$treatment,
+                        seed = 25463)
+
+# get ITEs
+cf_all_below_ITE <- predict(cf_all_below)$predictions
+
+# combine ITEs with customer numbers
+cf_result_all_below <- data.frame(cn_all_below, cf_all_below_ITE) %>%
+  mutate(cf_all_below_ITE = cf_all_below_ITE * all_stdev_below + all_mean_below) %>%
+  rename(CUSTOMER_NUMBER = cn_all_below,
+         ITE_avg_gal_per_year = cf_all_below_ITE) %>%
+  arrange(desc(ITE_avg_gal_per_year))
+
+# print ITE & ATE
+head(cf_result_all_below, 10)
+average_treatment_effect(cf_all_below, target.sample = "control") * all_stdev_below + all_mean_below
+
+# variable importance
+importance <- variable_importance(cf_all_below)
+names <- cf_data_all_below_s %>%
+  select(-c(CUSTOMER_NUMBER, treatment, avg_gal_per_year)) %>%
+  colnames()
+cf_all_below_imp <- data.frame(feature = names, importance) %>%
+  arrange(desc(importance))
+cf_all_below_imp
+
+# stop parallel processing
+doParallel::stopImplicitCluster()
+```
+
+Results:
+
+- Root Mean Squared Error is 1.00 (in the standardized scale).
+- R-squared is 0.01, which means it's just barely better than just estimating the mean value.
+- ATE is 124 average gallons per year average for control customers (not already sales rep).
+- Top 10 customers have an ITE of 151+ avg gallons per year.
+- Most important features: fountain_total, cases_total, and ZIP_CODE.
+
+<br>
+
+
+## Model Results
+
+### Performance Metrics
+
+None of the models performed well.
+
+The highest R-squared value was 0.05, for the subset of customers which are local market partners, fountain only, no CO2, and under 400 gallons average per year.
+
+The lowest MSE was 0.83 in the set of all customers. However, this value is in the standardized scale.
+```{r}
+# re-calculate MSE of entire dataset
+rmse_all <- (cf_data_all_test$avg_gal_per_year - predictions_all_cv)^2 %>%
+  mean() %>%
+  sqrt()
+print(paste("Root Mean Squared Error on validation set:", rmse))
+
+# convert from standardized units to avg gal per year
+rmse_all * all_stdev + all_mean
+```
+
+Converted to average gallons per year, the mean squared error is extremely large, at over 4000 gallons. None of the models captured the variance in the data well.
+
+<br>
+
+## Individual Treatment Effects (ITE)
+
+Compare outputs to original order type...
+```{r}
+# extract frequent order type and customer number
+fot_original <- profile_all_cleaned %>%
+  select(CUSTOMER_NUMBER, FREQUENT_ORDER_TYPE)
+
+# treatment of swapping
+ITE_data_1 <- merge(x = fot_original,
+                  y = cf_result_all,
+                  by = "CUSTOMER_NUMBER",
+                  all.x = TRUE) %>%
+  rename(cf_all_ITE = ITE_avg_gal_per_year)
+
+ITE_data_2 <- merge(x = ITE_data_1,
+                    y = cf_result_subset,
+                    by = "CUSTOMER_NUMBER",
+                    all.x = TRUE)  %>%
+  rename(cf_subset_ITE = ITE_avg_gal_per_year)
+
+ITE_data_3 <- merge(x = ITE_data_2,
+                    y = cf_result_all_below,
+                    by = "CUSTOMER_NUMBER",
+                    all.x = TRUE)  %>%
+  rename(cf_all_ITE_below = ITE_avg_gal_per_year)
+
+ITE_data_4 <- merge(x = ITE_data_3,
+                    y = cf_result_subset_below,
+                    by = "CUSTOMER_NUMBER",
+                    all.x = TRUE)  %>%
+  rename(cf_subset_ITE_below = ITE_avg_gal_per_year)
+
+# all customers
+ITE_data_4 %>%
+  filter(FREQUENT_ORDER_TYPE != "SALES REP") %>%
+  select(CUSTOMER_NUMBER, FREQUENT_ORDER_TYPE, cf_all_ITE) %>%
+  arrange(desc(cf_all_ITE))
+
+# subset customers
+ITE_data_4 %>%
+  filter(FREQUENT_ORDER_TYPE != "SALES REP") %>%
+  select(CUSTOMER_NUMBER, FREQUENT_ORDER_TYPE, cf_subset_ITE) %>%
+  arrange(desc(cf_subset_ITE))
+
+# all customers, below 400 gal threshold
+ITE_data_4 %>%
+  filter(FREQUENT_ORDER_TYPE != "SALES REP") %>%
+  select(CUSTOMER_NUMBER, FREQUENT_ORDER_TYPE, cf_all_ITE_below) %>%
+  arrange(desc(cf_all_ITE_below))
+
+# subset customers, below 400 gal threshold
+ITE_data_4 %>%
+  filter(FREQUENT_ORDER_TYPE != "SALES REP") %>%
+  select(CUSTOMER_NUMBER, FREQUENT_ORDER_TYPE, cf_subset_ITE_below) %>%
+  arrange(desc(cf_subset_ITE_below))
+
+# rename columns
+final_ITEs_for_sales_rep_cf <- ITE_data_4 %>%
+  filter(FREQUENT_ORDER_TYPE != "SALES REP") %>%
+  rename(ITE_all = cf_all_ITE,
+         ITE_sub = cf_subset_ITE,
+         ITE_all_bt = cf_all_ITE_below,
+         ITE_sub_bt = cf_subset_ITE_below)
+
+head(final_ITEs_for_sales_rep_cf)
+
+# save as csv, if needed
+write.csv(final_ITEs_for_sales_rep_cf, file = "final_ITEs_for_sales_rep_cf.csv", row.names = FALSE)
+```
+
+<br>
+
+# Quantify Benefit from HTE T-Learner Model
+
+Dan's T-learner model for Heterogenous Treatment Effect had higher R-squared values than the causal forest models here. Using the estimated individual treatment effect (ITE) values from his model, I performed additional analysis to quantify the benefits of this approach.
+
+How many customers below threshold?
+```{r}
+cust_profile_c %>%
+  group_by(threshold_400_gal) %>%
+  summarise(count = n())
+```
+
+22772 customers are currently below 400 gallons average per year.
+
+<br>
+
+Import ITEs for customers and combine with original dataset
+```{r}
+# load in data
+SalesRepITE <- read.csv("SalesRepITE.csv")
+
+# extract ITE from other data (which has been scaled and turned into dummies)
+ITE <- SalesRepITE %>%
+  select(CUSTOMER_NUMBER, treatment_effect)
+
+# combine with original data
+cust_ITE <- merge(x = cust_profile_c,
+                  y = ITE,
+                  by = "CUSTOMER_NUMBER",
+                  all.x = TRUE)
+```
+
+<br>
+
+Compute CATEs for different populations:
+```{r}
+# population ATE
+ATE <- mean(cust_ITE$treatment_effect, na.rm = TRUE)
+print(paste("ATE for the Population:",
+            round(ATE,0)))
+
+# subset customers CATE
+CATE_sub <- cust_ITE %>%
+  filter(LOCAL_MARKET_PARTNER == TRUE &
+         CO2_CUSTOMER == FALSE &
+         fountain_only == TRUE) %>%
+  summarise(mean_TE = mean(treatment_effect, na.rm = TRUE)
+           )
+print(paste("CATE for LMP, fountain only, no CO2 customers:", 
+            round(CATE_sub$mean_TE,0)))
+
+# TE among the treated
+CATE_treated <- cust_ITE %>%
+  filter(FREQUENT_ORDER_TYPE == "SALES REP") %>%
+  summarise(mean_TE = mean(treatment_effect, na.rm = TRUE)
+           )
+print(paste("CATE among the 'treated':",
+            round(CATE_treated$mean_TE,0)))
+
+# TE among the control whole pop
+CATE_control <- cust_ITE %>%
+  filter(FREQUENT_ORDER_TYPE != "SALES REP") %>%
+  summarise(mean_TE = mean(treatment_effect, na.rm = TRUE)
+           )
+print(paste("CATE among the 'control' population:",
+            round(CATE_control$mean_TE,0)))
+
+# TE among the control LMP, fountain only, no CO2
+CATE_control_sub <- cust_ITE %>%
+  filter(LOCAL_MARKET_PARTNER == TRUE &
+         CO2_CUSTOMER == FALSE &
+         fountain_only == TRUE &
+         FREQUENT_ORDER_TYPE != "SALES REP") %>%
+  summarise(mean_TE = mean(treatment_effect, na.rm = TRUE)
+           )
+print(paste("CATE among the 'control' subset of LMP/fountain only/no CO2:",
+            round(CATE_control_sub$mean_TE,0)))
+
+# TE among the cold drink channel "Wellness" (control)
+CATE_cdc_well <- cust_ITE %>%
+  filter(FREQUENT_ORDER_TYPE != "SALES REP" &
+         COLD_DRINK_CHANNEL == "WELLNESS") %>%
+  summarise(mean_TE = mean(treatment_effect, na.rm = TRUE)
+           )
+print(paste("CATE among the Cold Drink Channel 'Wellness' (not already using Sales Reps):",
+            round(CATE_cdc_well$mean_TE,0)))
+
+# TE among the sub-trade channel "Middle School" (control)
+CATE_stc_ms <- cust_ITE %>%
+  filter(FREQUENT_ORDER_TYPE != "SALES REP" &
+         SUB_TRADE_CHANNEL == "MIDDLE SCHOOL") %>%
+  summarise(mean_TE = mean(treatment_effect, na.rm = TRUE)
+           )
+print(paste("CATE among the Sub-Trade Channel 'Middle School' (not already using Sales Reps):",
+            round(CATE_stc_ms$mean_TE,0)))
+
+# TE among the sub-trade channel "Books & Office" (control)
+CATE_stc_bo <- cust_ITE %>%
+  filter(FREQUENT_ORDER_TYPE != "SALES REP" &
+         SUB_TRADE_CHANNEL == "BOOKS & OFFICE") %>%
+  summarise(mean_TE = mean(treatment_effect, na.rm = TRUE)
+  )
+print(paste("CATE among the Sub-Trade Channel 'Books & Office' (not already using Sales Reps):",
+            round(CATE_stc_bo$mean_TE,0)))
+
+# TE among the trade channel "General Retailer"
+CATE_tc_gr <- cust_ITE %>%
+  filter(FREQUENT_ORDER_TYPE != "SALES REP" &
+         TRADE_CHANNEL == "GENERAL RETAILER") %>%
+  summarise(mean_TE = mean(treatment_effect, na.rm = TRUE)
+  )
+print(paste("CATE among the Trade Channel 'General Retailer' (not already using Sales Reps):",
+            round(CATE_tc_gr$mean_TE,0)))
+
+# TE among the sub-trade channel "primary school" (control)
+CATE_stc_ps <- cust_ITE %>%
+  filter(FREQUENT_ORDER_TYPE != "SALES REP" &
+         SUB_TRADE_CHANNEL == "PRIMARY SCHOOL") %>%
+  summarise(mean_TE = mean(treatment_effect, na.rm = TRUE)
+  )
+print(paste("CATE among the Sub-Trade Channel 'Primary School' (not already using Sales Reps):",
+            round(CATE_stc_ps$mean_TE,0)))
+```
+
+<br>
+
+Calculate how many customers will cross threshold if given treatment (change from current Frequent Order Type to Sales Rep).
+```{r}
+# current avg_gal_per_year plus the treatment effect
+cross_threshold <- cust_ITE %>%
+  mutate(current_plus_TE = avg_gal_per_year + treatment_effect)
+
+# count how many in dataset not already on sales rep
+cross_threshold %>%
+  filter(FREQUENT_ORDER_TYPE != "SALES REP") %>%
+  summarise(count_total = n())
+
+# count how many in dataset not already on sales rep & subset
+cross_threshold %>%
+  filter(LOCAL_MARKET_PARTNER == TRUE &
+         CO2_CUSTOMER == FALSE &
+         fountain_only == TRUE &
+         FREQUENT_ORDER_TYPE != "SALES REP") %>%
+  summarise(count_total_sub = n())
+
+# count how many now would have avg_gal_per_year over the threshold
+cross_threshold %>%
+  filter(FREQUENT_ORDER_TYPE != "SALES REP") %>%
+  filter(current_plus_TE >= 400) %>%
+  summarise(count_impact = n())
+
+41/10461 # customers in ITE dataset that don't use sales rep
+```
+
+There are 10461 customers in the whole dataset below 400 gallons average per year and with a Frequent Order Type other than Sales Reps, and 484 in the subset dataset (LMP, fountain only, no CO2). Of the total customers, 41 (4%) would cross the 400-gallon threshold with the addition of their estimated treatment effect.
+
+<br>
+
+Show top customers that would benefit, and their expected ITE.
+```{r}
+cust_ITE %>%
+  select(CUSTOMER_NUMBER, FREQUENT_ORDER_TYPE, avg_gal_per_year, treatment_effect) %>%
+  filter(FREQUENT_ORDER_TYPE != "SALES REP") %>%
+  arrange(desc(treatment_effect)) %>%
+  head(10)
+```
+
+These large treatment effects might not be the most accurate in the real world given that these customers have very low annual volumes. Some may be newer and others perhaps stopped ordering, so these volumes might reflect only part of the years of data provided.
+
+<br>
+
+# Conclusion
+
+This exercise is a proof-of-concept for heterogenous treatment effect modeling as a way SCC could identify customers for intervention to increase their ordering volumes or their growth.
+
+<br>
+
+With limited time to work on this project and limited and anonymized data, we intended to show that once SCC identifies customer behaviors associated with growth, including the use of Sales Reps and MyCoke 360 frequent order methods discovered in our earlier analysis, treatment effect modeling could be used to identify which customers would benefit the most if SCC encouraged them to change their behaviors.

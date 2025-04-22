@@ -1,0 +1,1150 @@
+---
+title: "Group 6 EDA"
+date: "2025-02-21"
+output: 
+  html_document:
+      toc: true
+      toc_depth: 3
+      toc_float:
+        collapsed: true
+        smooth_scroll: true
+        position: left
+      toc_title: "Contents"
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+## Introduction
+**Project Goal:** <br>
+Identify characteristics of customers that order above a specific threshold annually to determine what might indicate "high growth potential" in customers below the threshold.
+
+<br>
+
+**Business Problem Summary:** <br>
+Swire Coca-Cola wants to optimize logistic transport costs by changing some direct delivery ("red truck") customers to a third-party delivery ("white truck"). They need to identify characteristics of customers which order greater than 400 gallons of product per year in order to determine which customers below this threshold might have "high growth potential". These "high growth potential" customers may exceed the 400 gallon threshold in the future if they continue with red truck delivery and business support services instead of being swapped to white truck.
+
+<br>
+
+**Analytics Problem Summary:** <br>
+Create a supervised classification model to predict the categories of customers based on historical sales data and customer characteristics. The categories of the target variable will be "above 400 gal threshold" and "below 400 gal threshold" of average gallons ordered per year, or alternatively, average gallons ordered per year can be used to create different threshold or category levels. The model must have interpretable results, especially feature importance.
+
+<br>
+
+**Notebook Purpose:** <br>
+This notebook will include exploratory data analysis (EDA) to prepare for modeling.
+
+<br>
+
+**Questions:**
+
+-   Describe data:
+    -   What is the structure of the data?
+    -   What is the target variable?
+        -   Is the data unbalanced with respect to the target variable?
+        -   What would the accuracy be with a majority class classifier?
+    -   What kinds of predictor variables are there?
+    -   What features can we pull from categorical factor or text variables?
+    -   Is there a majority class in any factor feature?
+    -   Is there data missing from the provided datasets?
+        -   Will the missing data have impacts on our analysis or can it be ignored?
+-   Clean data:
+    -   Should any numeric or character fields be factored? (in case chosen model doesn't automatically factor)
+    -   What columns have NAs?
+    -   Can the NAs be explained?
+    -   Do any columns have a significant proportion of unexplained NAs so should be excluded?
+    -   Can NAs be reasonably imputed?
+    -   Are there any mistaken values?
+    -   Are there any outlier values that may skew a predictor?
+-   Explore data relationships:
+    -   What may be strong predictors of the target variable?
+    -   Are there relationships between any predictor variables (e.g. multicollinearity)?
+    -   What feature engineering can be done?
+    -   Does log transformation of predictors or target help them correlate better?
+
+# Get Data 
+## Load packages
+```{r packages, echo = FALSE}
+#install.packages("fastDummies")
+#install.packages("ggplot2")
+#install.packages('ggcorrplot')  
+#install.packages("corrplot")
+library(corrplot)
+library(ggcorrplot)
+library(fastDummies)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(rlang)
+```
+
+## Load in all datasets
+```{r load dataset}
+
+delivery_data_raw <- read.csv('C:/Users/daniel.powell/Documents/R/Data/delivery_cost_data.csv')
+customer_profile_raw <- read.csv('C:/Users/daniel.powell/Documents/R/Data/customer_profile.csv')
+customer_address_and_zip_raw <- read.csv('C:/Users/daniel.powell/Documents/R/Data/customer_address_and_zip_mapping.csv')
+transactional_data_raw <- read.csv('C:/Users/daniel.powell/Documents/R/Data/transactional_data.csv')
+
+```
+
+# Describe Data
+## Customer Profile
+This dataset contains detailed customer information, ranging from onboarding to purchasing behavior. Each customer is assigned a unique ID, and customers with multiple locations have a primary group number. If a customer isn’t affiliated with others, this field will contain NA. Additional data includes the customer's onboarding date, first delivery date, industry, whether a customer is a local market partner, and whether or not they purchase CO2 products. It also includes the customer’s associated ZIP code, which could be useful for later joining with the delivery dataset.
+
+## Customer Address
+This dataset maps ZIP codes to full address information. While the ZIP codes are real, they do not represent the actual delivery locations, protecting the privacy of the company’s data. This information could be valuable if location is found to play a significant role in customer growth potential during exploration.
+
+## Transactional Data
+This dataset provides detailed transaction-level information, including order quantities and delivery metrics. It records the transaction date, customer ID, and order details from placement to delivery. All cases have been converted to standard physical cases, where one case equals one gallon, allowing for easy combination of cases and gallons into a total amount. It’s important to note that delivery data is stored separately from order data, which should be kept in mind during analysis.
+
+## Delivery Cost Data
+This dataset includes information on volume ranges by category and cold drink channel, along with cost per unit and median delivery costs by category. However, this dataset focuses more on general delivery metrics than on individual customer performance, which is the primary focus of this analysis. Therefore, it has been excluded from this analysis. If further exploration suggests it’s necessary, this dataset will be reconsidered for inclusion.
+
+# Clean Data
+
+## Joining Datasets
+The customer address and zip information seems to be a simple dataset just containing the customer's zip code, along with their full address. This could be useful for geo-mapping. The more useful of the two customer datasets does seem to be the profile dataset. This contains information on the customer's frequent order type, cold drink channel (which can be linked to connect delivery data to customers) and the customer's id, which can be used to connect to our transaction data. Now that we have identified similar columns, we will now connect the 4 tables based on their primary and foreign keys.
+
+```{r joining datasets}
+#join customer address to customer profile
+customers_raw_joined <- left_join(customer_profile_raw, customer_address_and_zip_raw, by =c('ZIP_CODE' = 'zip'))
+
+#customer joined with transactions
+customers_trans_joined <- left_join(transactional_data_raw, customers_raw_joined, by ='CUSTOMER_NUMBER')
+```
+
+## Casting Data Types
+Now that we have most of our data in a single dataset, let's transform our character variables into factors or other datatypes where appropriate.
+
+```{r data types}
+#get character columns
+cust_tran_chr_cols <- names(customers_trans_joined)[sapply(customers_trans_joined, is.character)]
+str(customers_trans_joined[cust_tran_chr_cols])
+#convert dates to dates
+date_columns_tran_cust <- c('TRANSACTION_DATE', 'FIRST_DELIVERY_DATE', 'ON_BOARDING_DATE')
+customers_trans_joined_dates <- customers_trans_joined %>%
+  mutate(across(all_of(date_columns_tran_cust), ~ case_when(
+    TRUE ~ as.Date(., format = "%m/%d/%Y")
+  )))
+#convert remain chr to factors excluding full address
+customers_trans_joined_factored <- customers_trans_joined_dates %>%
+  mutate(across(where(is.character) & !matches("full.address"), as.factor))
+#confirm factored and dates formatted
+str(customers_trans_joined_factored)
+
+#get delivery character columns converted to factors
+delivery_data_factored <- delivery_data_raw %>%
+  mutate(across(where(is.character) & !matches("Median.Delivery.Cost"), as.factor))
+#convert dollars to decimal for median delivery cost
+delivery_data_factored$Median.Delivery.Cost <- as.numeric(gsub("[$,]", "", delivery_data_factored$Median.Delivery.Cost))
+
+```
+
+## Check and Correct for Nulls
+
+```{r null check}
+#check delivery data for nulls
+delivery_data_factored %>%
+  summarize(across(everything(), ~sum(is.na(.)))) %>%
+  print()
+stg_delivery <- delivery_data_factored
+#check tran_cust for nulls
+customers_trans_joined_factored %>%
+  summarize(across(everything(), ~sum(is.na(.)))) %>%
+  print()
+#create copy of joined and factored dataset
+stg_cust_tran <- customers_trans_joined_factored
+stg_cust_tran$PRIMARY_GROUP_NUMBER <- factor(ifelse(is.na(stg_cust_tran$PRIMARY_GROUP_NUMBER),  # then convert NAs to...
+                                         "NA",                       # ...a character factor level
+                                         stg_cust_tran$PRIMARY_GROUP_NUMBER))
+#check castings
+str(stg_cust_tran)
+
+```
+
+The only column containing null values is the Primary Group Number in the Customer Profile dataset. Because this variable is the only indicator of whether or not the customer is part of a chain, this information will be kept but the variable will be adjusted to a factor variable to remove the inclusion of NA values.
+
+
+## Creating Target Variable
+According to Swire, the total amount ordered is a combination of ordered gallons and ordered cases. Because of this, we will combine the numerical variables together into an ordered total.
+
+```{r ordered total}
+stg_cust_tran_clean <- stg_cust_tran
+#created ordered total column
+stg_cust_tran_clean$ordered_Total <- stg_cust_tran$ORDERED_CASES + stg_cust_tran$ORDERED_GALLONS
+#display summary stats
+summary(stg_cust_tran_clean$ordered_Total)
+
+```
+Aggregate gallons per year to get a feature for average per year per customer and create a binary of below or above the 400 gallon per year threshold as a potential target variable.
+
+```{r getting average gallons per year}
+# create summary dataset of average ordered gallons
+cust_gallons <- stg_cust_tran_clean %>%
+  group_by(CUSTOMER_NUMBER) %>%    # aggregate by customer
+  summarise(total_gal_2023 = (sum(ORDERED_CASES[YEAR == 2023]) + sum(ORDERED_GALLONS[YEAR == 2023])),
+            total_gal_2024 = (sum(ORDERED_CASES[YEAR == 2024]) + sum(ORDERED_GALLONS[YEAR == 2024])),
+            avg_gal_per_year = (total_gal_2023 + total_gal_2024)             # calculate total gallons
+                                /2) %>%                                      # divide by 2 years
+  mutate(threshold_400_gal = ifelse(avg_gal_per_year >= 400,
+                                    TRUE,            # if equal or above 400 gal, meets threshold
+                                    FALSE)           # if below 400 gal, does not meet threshold
+         )
+
+# add the new data to the raw customer profile + address
+cust_profile_target <- merge(x = customers_raw_joined,
+                              y = cust_gallons,
+                              by = "CUSTOMER_NUMBER",
+                              all.x = TRUE)
+
+# clean that new customer profile dataset
+cust_profile_target_clean <- cust_profile_target %>%
+  mutate(CUSTOMER_NUMBER = factor(CUSTOMER_NUMBER),
+         PRIMARY_GROUP_NUMBER = ifelse(is.na(PRIMARY_GROUP_NUMBER),  # then convert NAs to...
+                                         "NA",                       # ...a character factor level
+                                         PRIMARY_GROUP_NUMBER),
+         PRIMARY_GROUP_NUMBER = factor(PRIMARY_GROUP_NUMBER),        # then factor
+         FREQUENT_ORDER_TYPE = factor(FREQUENT_ORDER_TYPE),
+         FIRST_DELIVERY_DATE = as.Date(FIRST_DELIVERY_DATE, "%m/%d/%Y"),  # no leading zero on m,d; 4-digit year
+         ON_BOARDING_DATE = as.Date(ON_BOARDING_DATE, "%m/%d/%Y"),        # no leading zero on m,d; 4-digit year
+         COLD_DRINK_CHANNEL = factor(COLD_DRINK_CHANNEL),
+         TRADE_CHANNEL = factor(TRADE_CHANNEL),
+         SUB_TRADE_CHANNEL = factor(SUB_TRADE_CHANNEL),
+         ZIP_CODE = factor(ZIP_CODE),
+         total_gal_2023 = ifelse(is.na(total_gal_2023),             # convert NAs to...
+                                 0,                                 # ...0 gallons ordered
+                                 total_gal_2023),
+         total_gal_2024 = ifelse(is.na(total_gal_2024),             # convert NAs to...
+                                 0,                                 # ...0 gallons ordered
+                                 total_gal_2024),
+         avg_gal_per_year = ifelse(is.na(avg_gal_per_year),         # convert NAs to...
+                                   0,                               # ...0 gallons ordered
+                                   avg_gal_per_year),
+         threshold_400_gal = ifelse(is.na(threshold_400_gal),       # convert NAs to...
+                                    FALSE,                          # ...FALSE = below threshold
+                                    threshold_400_gal)
+  )
+
+```
+
+
+## Explore Data
+
+### Target Variable Imbalance
+We then created a simple barplot of distribution of count of customers across 
+
+the two levels of target 400 gallon threshold classes.
+
+```{r target graphs}
+
+
+# Create a bar plot using the dataset 'cust_profile_target_clean'
+ggplot(cust_profile_target_clean, aes(x = threshold_400_gal)) +
+  
+  # Adding a bar geometry to visualize the count of customers in each category of 'threshold_400_gal'
+  geom_bar(fill = "steelblue") +
+  
+  # Adding title and labels for the x and y axes
+  labs(
+    title = "Distribution of Target Variable - 400 gallon Threshold", 
+    x = "Above 400 gallon Threshold",  
+    y = "Count of Customers"  
+  ) +
+  
+  # Apply a minimal theme for a clean look
+  theme_minimal()
+```
+
+Check the balance (or imbalance) of the target variable.
+
+```{r}
+# calculate accuracy of majority class prediction
+round(
+sum(cust_profile_target_clean$threshold_400_gal == FALSE,   # count number of FALSE values
+    na.rm = TRUE                                      # ignore NA rows when looking for FALSE
+    ) / nrow(cust_profile_target_clean),                    # divide by number of rows total
+2)
+
+```
+
+A simple model using a majority class classifier would be accurate 74% of the time. This means the classes are mildly imbalanced, which may not need correcting during modeling. Model evaluation should use a metric other than accuracy or ROC-AUC due to their susceptibility to class imbalance; better choices would be an F1 score or PR-AUC.
+
+## Barplots for Categorical Variables
+
+We generated barplots for every categorical variable in the cleaned data frame, using the above described method.
+
+```{r}
+
+# List of categorical variables (or logical ones) in the dataframe
+categorical_vars <- cust_profile_target_clean %>%
+  select(where(~ is.factor(.) | is.logical(.))) %>%
+  colnames()
+
+# Exclude unwanted variables
+excluded_vars <- c("threshold_400_gal", "CUSTOMER_NUMBER", "PRIMARY_GROUP_NUMBER", "ZIP_CODE")
+categorical_vars <- setdiff(categorical_vars, excluded_vars)
+
+# Create a plot for each categorical variable
+for (var in categorical_vars) {
+  # Calculate percentages within each group for the current variable
+  distribution <- cust_profile_target_clean %>%
+    group_by(threshold_400_gal, !!sym(var)) %>%
+    summarise(count = n(), .groups = "drop") %>%
+    group_by(threshold_400_gal) %>%
+    mutate(percent = count / sum(count) * 100)
+
+  # Create the plot
+  p <- ggplot(distribution, aes(x = reorder(!!sym(var), -percent), y = percent, fill = factor(threshold_400_gal))) +
+    geom_bar(stat = "identity", position = "dodge") +
+    scale_fill_manual(values = c("steelblue", "darkorange"), labels = c("Below 400 Gallons", "400+ Gallons")) +
+    labs(title = paste("Percentage Distribution of", var, "by 400-Gallon Threshold"),
+         x = var,
+         y = "Percentage",
+         fill = "Threshold (400 Gallons)") +
+    theme_minimal() +
+    coord_flip()  # Flip for better readability
+
+  # Print the plot
+  print(p)
+}
+```
+
+*Significant observations:*  
+
+*   Cold Drink Channel barplot: Event and Bulk Trade were both far more prevalent in binary class 1 (400 or more).
+*   CO2 Customer barplot: This distribution is strikingly equal, suggesting no relationship between being a CO2 customer and a 400+ gallon customer.
+*   Sub Trade Channel barplot: Pizza Fast Food providers and Comprehensive Providers were somewhat more likely to be 400+ customers.
+*   Local Market Partner: Almost 25% of 400+ gallon customers are not local market partners, as opposed to about 8% of less than 400 gallon customers.
+
+
+This next code makes a similar barplot for each year found within First Delivery Date, to see if more 400+ gallon customers are found in one year vs another.
+
+```{r barplot2}
+library(forcats)
+# Extract year from FIRST_DELIVERY_DATE and treat it as a factor
+cust_profile_target_clean <- cust_profile_target_clean %>%
+  mutate(FIRST_DELIVERY_YEAR = factor(format(FIRST_DELIVERY_DATE, "%Y")))
+
+# Calculate percentage distribution by FIRST_DELIVERY_YEAR and threshold_400_gal
+year_distribution <- cust_profile_target_clean %>%
+  group_by(threshold_400_gal, FIRST_DELIVERY_YEAR) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(threshold_400_gal) %>%
+  mutate(percent = count / sum(count) * 100)
+
+# Create the plot with years in descending order
+ggplot(year_distribution, aes(x = fct_rev(FIRST_DELIVERY_YEAR), y = percent, fill = factor(threshold_400_gal))) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_fill_manual(values = c("steelblue", "darkorange"), labels = c("Below 400 Gallons", "400+ Gallons")) +
+  labs(title = "Percentage Distribution of 400-Gallon Threshold by First Delivery Year",
+       x = "Year",
+       y = "Percentage",
+       fill = "Threshold (400 Gallons)") +
+  theme_minimal() +
+  coord_flip()
+
+
+```
+
+
+We see a greater percentage of 400+ gallon customers in the mid-to-late 2010s than in more recent years.
+
+
+## Correlation Matrix
+
+
+Next is a correlation matrix for the few numeric variables in the dataframe. Not very informative besides to confirm that there aren't any unexpected collinear relationships going on.
+
+```{r}
+
+# Select numeric columns from cust_profile_target_clean
+numeric_data <- cust_profile_target_clean %>%
+  select(total_gal_2023, total_gal_2024, avg_gal_per_year)
+
+# Calculate the correlation matrix
+correlation_matrix <- cor(numeric_data, use = "complete.obs")
+
+# Plot the correlation matrix
+ggcorrplot(correlation_matrix, hc.order = TRUE, type = "lower", lab = TRUE, title = "Correlation Matrix of Numeric Features")
+
+
+```
+
+These three numeric variables are all extremely collinear, which we expect as they are related engineered features. We will need to be careful about adding them simultaneously to the same model in the Modeling phase of this project.
+
+## Boxplots of Ordered Total Per Transaction for Categorical Variables
+
+Next, here's a series boxplots showing the exact distribution of Ordered Total volumes for customers in each level of all categorical variables.
+
+```{r boxplots}
+
+# List of factor variables in your new dataset, excluding threshold_400_gal
+factor_vars <- c("FREQUENT_ORDER_TYPE", "COLD_DRINK_CHANNEL", "TRADE_CHANNEL",
+                 "SUB_TRADE_CHANNEL", "LOCAL_MARKET_PARTNER")
+
+# Create an empty list to store the plots
+plot_list <- list()
+
+# Loop through each factor variable and create a boxplot
+for (var in factor_vars) {
+  plot <- ggplot(cust_profile_target_clean %>% filter(avg_gal_per_year > 0), aes(x = !!sym(var), y = avg_gal_per_year, fill = !!sym(var))) +
+    geom_boxplot() +
+    labs(title = paste("Distribution of Avg Gallons per Year by", var)) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Rotate x-axis labels for better readability
+
+  # Store the plot in the list
+  plot_list[[var]] <- plot
+}
+
+# Print all the plots
+for (plot in plot_list) {
+  print(plot)
+}
+
+```
+
+These boxplots suggest that further work to reduce outliers could be warranted before modeling, since the boxes are flattened and condensed at the bottom of their respective graphs.
+
+With the exception of a new outlier, the majority of customers are ordering less then 2000 cases.
+
+```{r boxplots3}
+boxplot(stg_cust_tran_clean$ORDERED_CASES, main = "Ordered Cases Boxplot")
+```
+
+
+## Percent Change from 2023 to 2024 as a possible Target
+
+Checking to see how customers either increased or decreased their total order quantities from 2023 to 2024. This will  used in conjunction with the 400 gallon threshold to also see what attributes contributed to either a growth or decline. This can be used either a raw number, percentage, or a categorical variable of growth.
+
+```{r pctchange}
+#  Calculate total order per year for each customer
+customer_year_totals <- stg_cust_tran_clean %>%
+  group_by(CUSTOMER_NUMBER, YEAR) %>%                         # Group by customer and year
+  summarise(total_order_per_year = sum(ordered_Total, na.rm = TRUE), .groups = "drop")  # Sum for each group
+
+#  Calculate percent change year-over-year for each customer
+customer_year_totals <- customer_year_totals %>%
+  arrange(CUSTOMER_NUMBER, YEAR) %>%                          # Ensure the data is ordered by customer and year
+  group_by(CUSTOMER_NUMBER) %>%                               # Group by customer to calculate percentage change within each group
+  mutate(percent_change = ((total_order_per_year - lag(total_order_per_year)) / lag(total_order_per_year)) * 100)  # Calculate YoY change
+
+#  Display results
+customer_year_totals %>%
+  arrange(CUSTOMER_NUMBER, YEAR) %>%
+  head()  # Show first few rows for verification
+```
+
+Pivoting the previous data to be more readable, this will also be used to create a binary varible for growth, which will be more helpful when joining other attributes to this data.
+
+```{r yearsummary}
+#  Pivot the data so that each customer has one row with separate columns for each year
+customer_year_summary <- customer_year_totals %>%
+  select(CUSTOMER_NUMBER, YEAR, total_order_per_year) %>%
+  pivot_wider(names_from = YEAR, values_from = total_order_per_year, names_prefix = "total_order_") %>%
+  rename(total_order_2023 = total_order_2023, total_order_2024 = total_order_2024)
+
+#  Calculate the percent change between 2023 and 2024
+customer_year_summary <- customer_year_summary %>%
+  mutate(percent_change = ((total_order_2024 - total_order_2023) / total_order_2023) * 100)
+
+#  Display the result
+customer_year_summary %>% head()
+```
+
+### Explore Customer Percent Change
+
+Here we convert the percant change into a categorial variable with grew, declined, or stayed the same. With the overall trend we can see that the majority of customers had a decline (roughly 14,000), about 11,000 grew and only 300 stayed the same. While the growth amount is still healthy, some more background research will need to be done to understand what is driving such a large decline. It might be regional issues, market trend, or change in internal processes.
+
+```{r yearsummary2}
+#  Categorize customers into 'grew', 'declined', or 'stayed_same'
+customer_year_summary <- customer_year_summary %>%
+  mutate(growth_category = case_when(
+    percent_change > 0 ~ "grew",
+    percent_change < 0 ~ "declined",
+    percent_change == 0 | abs(percent_change) < 0.001 ~ "stayed_same",
+    TRUE ~ "unknown"
+  ))
+
+#  Count the total number of customers in each category
+summary_stats <- customer_year_summary %>%
+  ungroup() %>%                      # Remove any grouping from previous steps
+  summarise(
+    grew = sum(growth_category == "grew"),
+    declined = sum(growth_category == "declined"),
+    stayed_same = sum(growth_category == "stayed_same")
+  )
+
+#  Display the final single-row summary
+summary_stats
+```
+
+### First Delivery & Percent Change
+
+Customers that joined in 2024 don't have a  percent change so those don't provide a helpful analysis.
+*   1 Year Since First Delivery: The median percent change is high at 46.81%, indicating that most customers significantly increase their orders after their first year.
+*   2-9 Years Since First Delivery: The average and median percent change gradually decrease over time. For example:
+  *   After 3 years, the average percent change is 6.85%, which is still positive but much lower than the first year.
+  *   By 9 years, the average percent change drops to 1.22%, showing that long-term customers tend to plateau in their order growth.
+
+From the graphs, we are also able to see that there are a few outliers in the data that should be considered as they could cause issues in the future when trying to train models.
+
+```{r firstdeliver}
+
+library(lubridate)
+#  Calculate the number of years since first delivery
+customer_years <- stg_cust_tran_clean %>%
+  select(CUSTOMER_NUMBER, FIRST_DELIVERY_DATE) %>%
+  distinct() %>%  # Ensure one row per customer
+  mutate(years_since_first_delivery = 2024 - year(as.Date(FIRST_DELIVERY_DATE)))
+
+#  Join with pivoted data containing percent change
+customer_summary <- customer_year_summary %>%
+  left_join(customer_years, by = "CUSTOMER_NUMBER")
+
+# Group customers by years since first delivery and summarize percent change
+summary_by_years <- customer_summary %>%
+  group_by(years_since_first_delivery) %>%
+  summarise(
+    avg_percent_change = mean(percent_change, na.rm = TRUE),
+    median_percent_change = median(percent_change, na.rm = TRUE),
+    count_customers = n()
+  ) %>%
+  arrange(years_since_first_delivery)
+
+# Display summary
+summary_by_years
+
+# Scatter plot of years since first delivery vs. percent change
+ggplot(customer_summary, aes(x = years_since_first_delivery, y = percent_change)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "lm", color = "blue", se = TRUE) +  # Linear regression line
+  labs(title = "Percent Change vs. Years Since First Delivery",
+       x = "Years Since First Delivery",
+       y = "Percent Change (%)") +
+  theme_minimal()
+
+# Line plot for average percent change over time
+ggplot(summary_by_years, aes(x = years_since_first_delivery, y = avg_percent_change)) +
+  geom_line(color = "darkgreen", size = 1.2) +
+  geom_point(size = 3) +
+  labs(title = "Average Percent Change by Years Since First Delivery",
+       x = "Years Since First Delivery",
+       y = "Average Percent Change (%)") +
+  theme_minimal()
+```
+
+Merging the data back together.
+
+### Trade Channels & Percent Change
+
+#### Top Performing Channels (by average growth):
+
+Outdoor Activities: Recorded an infinite (Inf) average percent change, likely due to extreme outliers.
+Bulk Trade: Showed the highest finite average growth at 111.40%, indicating substantial order increases.
+Activities (69.88%) and Mobile Retail (54.55%) also experienced notable growth.
+
+
+#### Low or Negative Growth Channels:
+
+Pharmacy Retailer: The only trade channel with negative average growth at -4.99%, indicating a decline in order volume.
+Large-Scale Retailer: Data was missing or non-finite for this category, possibly due to a small sample size (only 1 customer).
+
+
+#### Median Percent Change:
+
+Despite high average growth in some channels, the median percent change is often negative, indicating that while a few customers drive significant growth, the majority experience little or negative change.
+Healthcare and Travel stand out with positive medians, suggesting more consistent growth across customers within these channels.
+
+```{r tradechannels}
+# Extract TRADE_CHANNEL from the original dataset
+customer_trade_channels <- stg_cust_tran_clean %>%
+  select(CUSTOMER_NUMBER, TRADE_CHANNEL) %>%
+  distinct()  # Ensure one row per customer
+
+# Join with pivoted dataset
+customer_year_summary <- customer_year_summary %>%
+  left_join(customer_trade_channels, by = "CUSTOMER_NUMBER")
+
+# Group by TRADE_CHANNEL and summarize growth statistics
+trade_channel_summary <- customer_year_summary %>%
+  group_by(TRADE_CHANNEL) %>%
+  summarise(
+    avg_percent_change = mean(percent_change, na.rm = TRUE),
+    median_percent_change = median(percent_change, na.rm = TRUE),
+    count_customers = n()
+  ) %>%
+  arrange(desc(avg_percent_change))  # Sort by highest average growth
+
+# Display the summary
+trade_channel_summary
+
+
+# Bar Chart of Average Percent Change by Trade Channel
+ggplot(trade_channel_summary, aes(x = reorder(TRADE_CHANNEL, avg_percent_change), y = avg_percent_change)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +  # Flip for better readability
+  labs(title = "Average Percent Change by Trade Channel",
+       x = "Trade Channel",
+       y = "Average Percent Change (%)") +
+  theme_minimal()
+
+# Boxplot to Show Distribution of Percent Change for Each Trade Channel
+ggplot(customer_year_summary, aes(x = TRADE_CHANNEL, y = percent_change)) +
+  geom_boxplot() +
+  coord_flip() +
+  labs(title = "Distribution of Percent Change by Trade Channel",
+       x = "Trade Channel",
+       y = "Percent Change (%)") +
+  theme_minimal()
+
+```
+
+Verifying that each customer belongs to only 1 trade channel. If true, this can also be used as a predicting factor for Swire to help identify if certain trade channels can have an impact on growth.
+
+```{r tradechannelverification}
+library(stringr)
+# Count the number of distinct trade channels per customer (no filter)
+trade_channel_count <- stg_cust_tran_clean %>%
+  group_by(CUSTOMER_NUMBER) %>%
+  summarise(unique_trade_channels = n_distinct(TRADE_CHANNEL)) %>%
+  arrange(desc(unique_trade_channels))  # Sort in descending order
+
+# Display the top customers with the most unique trade channels
+head(trade_channel_count, 10)
+
+# Extract distinct trade channels for each customer
+customer_trade_channel_details <- stg_cust_tran_clean %>%
+  select(CUSTOMER_NUMBER, TRADE_CHANNEL) %>%
+  distinct() %>%
+  group_by(CUSTOMER_NUMBER) %>%
+  summarise(all_trade_channels = paste(unique(TRADE_CHANNEL), collapse = ", ")) %>%
+  arrange(desc(str_count(all_trade_channels, ",")))  # Sort by number of channels
+
+# Display the top customers
+head(customer_trade_channel_details, 10)
+
+#  Count the number of distinct trade channels per customer
+multiple_trade_channels <- stg_cust_tran_clean %>%
+  group_by(CUSTOMER_NUMBER) %>%
+  summarise(unique_trade_channels = n_distinct(TRADE_CHANNEL)) %>%
+  filter(unique_trade_channels > 1)  # Keep only customers with more than one trade channel
+
+#  Display the results
+multiple_trade_channels
+
+```
+
+Adding the trade channel to the percentage change data.
+
+```{r}
+
+#  Drop ALL columns named TRADE_CHANNEL before joining
+customer_year_summary <- customer_year_summary %>%
+  select(-contains("TRADE_CHANNEL"), everything())
+
+#  Extract unique CUSTOMER_NUMBER and TRADE_CHANNEL from the original dataset
+customer_trade_channel <- stg_cust_tran_clean %>%
+  select(CUSTOMER_NUMBER, TRADE_CHANNEL) %>%
+  distinct()
+
+#  Perform LEFT JOIN only once
+customer_year_summary <- customer_year_summary %>%
+  left_join(customer_trade_channel, by = "CUSTOMER_NUMBER")
+
+#  Drop ALL columns named TRADE_CHANNEL.y before joining
+customer_year_summary <- customer_year_summary %>%
+  select(-contains("TRADE_CHANNEL.y"), everything())
+
+#  Display the final dataset
+head(customer_year_summary)
+
+
+
+```
+
+
+## Additional Customer Feature Explortation
+
+### CO2 Customers
+
+There are significantly more FALSE instances (638,103) compared to TRUE (407,437).
+This suggests that the majority of customer records do not meet the CO2_CUSTOMER condition represented by TRUE.
+The ratio of FALSE to TRUE is approximately 1.57:1, indicating that for every customer record meeting the TRUE condition, there are about 1.57 records that do not.
+
+```{r co2cust}
+
+#  Count the number of distinct CO2_CUSTOMER values per customer
+multiple_co2_values <- stg_cust_tran_clean %>%
+  group_by(CUSTOMER_NUMBER) %>%
+  summarise(unique_co2_values = n_distinct(CO2_CUSTOMER, na.rm = TRUE)) %>%
+  filter(unique_co2_values > 1)  # Keep only customers with more than one distinct value
+
+#  Display the result
+multiple_co2_values
+
+#  Summarize total number of TRUE and FALSE values
+co2_summary <- stg_cust_tran_clean %>%
+  summarise(
+    total_true = sum(CO2_CUSTOMER == TRUE, na.rm = TRUE),   # Count all TRUE
+    total_false = sum(CO2_CUSTOMER == FALSE, na.rm = TRUE)  # Count all FALSE
+  )
+
+#  Display the result
+co2_summary
+
+```
+
+Adding the CO2 column into the data.
+
+```{r co2cust2}
+#  Extract unique CUSTOMER_NUMBER and CO2_CUSTOMER from the original dataset
+customer_co2 <- stg_cust_tran_clean %>%
+  select(CUSTOMER_NUMBER, CO2_CUSTOMER) %>%
+  distinct()
+
+#  LEFT JOIN to add CO2_CUSTOMER to the customer_year_summary dataset
+customer_year_summary <- customer_year_summary %>%
+  left_join(customer_co2, by = "CUSTOMER_NUMBER")
+
+#  Drop ALL columns named TRADE_CHANNEL.y before joining
+customer_year_summary <- customer_year_summary %>%
+  select(-contains("TRADE_CHANNEL.y"), everything())
+
+# : Display the updated dataset
+head(customer_year_summary)
+```
+
+### Cold Drink Channel
+
+Customers exclusively interact within a single channel, suggesting highly segmented customer behavior. Channels with fewer unique customers (i.e. WELLNESS, CONVENTIONAL) may offer growth potential, either by expanding the customer base or increasing engagement within existing customers.<br>
+
+This may indicate prioritizing channels like DINING and GOODS due to their higher engagement levels, while developing strategies to boost performance in lower-engagement channels like WELLNESS and CONVENTIONAL.
+
+
+```{r colddrink1}
+#  Summarize total counts and unique customer counts for each COLD_DRINK_CHANNEL
+cold_drink_summary <- stg_cust_tran_clean %>%
+  group_by(COLD_DRINK_CHANNEL) %>%                         # Group by channel
+  summarise(
+    total_count = n(),                                     # Count total records
+    unique_customers = n_distinct(CUSTOMER_NUMBER)         # Count unique customers
+  ) %>%
+  arrange(desc(total_count))                               # Sort by total count in descending order
+
+#  Display the result
+cold_drink_summary
+
+#  Count unique COLD_DRINK_CHANNEL per customer
+customer_channel_count <- stg_cust_tran_clean %>%
+  group_by(CUSTOMER_NUMBER) %>%                              # Group by customer
+  summarise(unique_channels = n_distinct(COLD_DRINK_CHANNEL))# Count unique channels
+
+#  Count how many customers have more than one channel
+multiple_channel_count <- customer_channel_count %>%
+  filter(unique_channels > 1) %>%                            # Filter for >1 channel
+  summarise(count_customers = n())                           # Count number of customers
+
+#  Display result
+multiple_channel_count
+
+
+```
+
+Adding cold drink channel to the data set.
+
+```{r colddrink2}
+#  Extract unique CUSTOMER_NUMBER and COLD_DRINK_CHANNEL from the original dataset
+customer_cold_drink_channel <- stg_cust_tran_clean %>%
+  select(CUSTOMER_NUMBER, COLD_DRINK_CHANNEL) %>%
+  distinct()
+
+#  LEFT JOIN to add COLD_DRINK_CHANNEL to the customer_year_summary dataset
+customer_year_summary <- customer_year_summary %>%
+  left_join(customer_cold_drink_channel, by = "CUSTOMER_NUMBER")
+
+# Display the updated dataset
+head(customer_year_summary)
+
+```
+
+### Sub-trade Channel
+
+```{r subtradechannel}
+# Summary statistics - count of each SUB_TRADE_CHANNEL
+sub_trade_channel_summary <- stg_cust_tran_clean %>%
+  count(SUB_TRADE_CHANNEL, name = "count") %>%  # Count occurrences
+  arrange(desc(count))  # Sort in descending order
+
+#  Distribution as percentages
+sub_trade_channel_distribution <- sub_trade_channel_summary %>%
+  mutate(percent = count / sum(count) * 100)  # Calculate percentage
+
+#  Display both datasets
+list(summary = sub_trade_channel_summary, distribution = sub_trade_channel_distribution)
+
+#  Count distinct SUB_TRADE_CHANNEL per CUSTOMER_NUMBER
+sub_trade_channel_count <- stg_cust_tran_clean %>%
+  group_by(CUSTOMER_NUMBER) %>%
+  summarise(unique_sub_trade_channel = n_distinct(SUB_TRADE_CHANNEL)) %>%
+  ungroup()
+
+#  Count the number of customers with more than one SUB_TRADE_CHANNEL
+multiple_sub_trade_channel_count <- sub_trade_channel_count %>%
+  filter(unique_sub_trade_channel > 1) %>%
+  summarise(total_customers_with_multiple_channels = n())
+
+#  Display the count
+multiple_sub_trade_channel_count
+
+```
+
+```{r subtrade2}
+# Extract unique CUSTOMER_NUMBER and SUB_TRADE_CHANNEL
+customer_sub_trade_channel <- stg_cust_tran_clean %>%
+  select(CUSTOMER_NUMBER, SUB_TRADE_CHANNEL) %>%
+  distinct()
+
+# LEFT JOIN to add SUB_TRADE_CHANNEL
+customer_year_summary <- customer_year_summary %>%
+  left_join(customer_sub_trade_channel, by = "CUSTOMER_NUMBER")
+
+#  Drop TRADE_CHANNEL.y column if it exists
+customer_year_summary <- customer_year_summary %>%
+  select(-contains("TRADE_CHANNEL.y"), everything())
+
+#  Display the updated dataset
+head(customer_year_summary)
+
+```
+
+### Local Market Partners
+
+TRUE records significantly outnumber FALSE records suggests that the majority of customer transactions involve local market partnerships.
+
+```{r localmarket}
+# Summarize LOCAL_MARKET_PARTNER counts
+local_market_summary <- stg_cust_tran_clean %>%
+  summarise(
+    total_true = sum(LOCAL_MARKET_PARTNER == TRUE, na.rm = TRUE),
+    total_false = sum(LOCAL_MARKET_PARTNER == FALSE, na.rm = TRUE),
+    total_customers = n_distinct(CUSTOMER_NUMBER),
+    percent_true = (total_true / (total_true + total_false)) * 100,  # Corrected calculation
+    percent_false = (total_false / (total_true + total_false)) * 100 # Corrected calculation
+  )
+
+# Display result
+local_market_summary
+```
+
+```{r localmarket2}
+ # Extract unique CUSTOMER_NUMBER and LOCAL_MARKET_PARTNER
+customer_local_market <- stg_cust_tran_clean %>%
+  select(CUSTOMER_NUMBER, LOCAL_MARKET_PARTNER) %>%
+  distinct()
+
+# LEFT JOIN to add LOCAL_MARKET_PARTNER
+customer_year_summary <- customer_year_summary %>%
+  left_join(customer_local_market, by = "CUSTOMER_NUMBER")
+
+#  Drop TRADE_CHANNEL.y column if it exists
+customer_year_summary <- customer_year_summary %>%
+  select(-contains("TRADE_CHANNEL.y"), everything())
+
+# Display the updated dataset
+head(customer_year_summary)
+
+```
+
+### Order Types
+
+The dataset contains 6 distinct FREQUENT_ORDER_TYPEs.
+
+
+#### Order Volume vs. Customer Base:
+
+SALES REP dominates with the highest number of unique customers (19,929), suggesting that many customers still prefer working directly with sales representatives.
+Despite fewer customers, OTHER has the highest total order volume, indicating higher order frequency within that group.
+
+
+#### Order Value Comparison:
+
+EDI has the highest average order total (39.5), which may reflect larger, bulk orders.
+CALL CENTER has the lowest average order total (13.9), suggesting smaller, potentially one-off or urgent orders.
+
+
+#### Online Ordering Platforms (MYCOKE360 and MYCOKE LEGACY):
+
+Both platforms have relatively low average order totals (20.6 and 20.0, respectively), which could indicate that online customers place smaller, more frequent orders.
+
+```{r countordertype}
+#  Summarize the count of each FREQUENT_ORDER_TYPE
+frequent_order_summary <- stg_cust_tran_clean %>%
+  group_by(FREQUENT_ORDER_TYPE) %>%
+  summarise(
+    total_customers = n_distinct(CUSTOMER_NUMBER),  # Unique customers
+    total_orders = n(),  # Total number of orders
+    avg_order_total = mean(ordered_Total, na.rm = TRUE),  # Average order value
+    median_order_total = median(ordered_Total, na.rm = TRUE)  # Median order value
+  ) %>%
+  arrange(desc(total_orders))
+
+#  Display results
+print(frequent_order_summary)
+
+
+```
+
+```{r yearsummaryordertype}
+#  Extract unique CUSTOMER_NUMBER and FREQUENT_ORDER_TYPE
+customer_frequent_order <- stg_cust_tran_clean %>%
+  select(CUSTOMER_NUMBER, FREQUENT_ORDER_TYPE) %>%
+  distinct()
+
+#  LEFT JOIN to add FREQUENT_ORDER_TYPE to customer_year_summary
+customer_year_summary <- customer_year_summary %>%
+  left_join(customer_frequent_order, by = "CUSTOMER_NUMBER")
+
+# S Drop TRADE_CHANNEL.y if it exists
+customer_year_summary <- customer_year_summary %>%
+  select(-contains("TRADE_CHANNEL.y"), everything())
+
+#  Display the updated dataset
+head(customer_year_summary)
+
+```
+
+#### Order Type Diversity Varies Among Customers:
+Some customers use only a single order type, while others utilize up to four different types. The maximum number of distinct order types in this sample is 4, suggesting a moderate level of order type variety within the dataset.
+
+
+#### Single vs. Multiple Order Types:
+Customers with 1 distinct order type may have more straightforward and predictable purchasing behavior.
+Customers with multiple order types might represent more complex or diverse needs, possibly ordering through different channels or for various purposes.
+
+#### Potential for Cross-Selling:
+Customers using fewer order types could be targeted for cross-selling opportunities by promoting the benefits of additional order types.
+
+Conversely, customers with multiple order types might be key accounts with diverse purchasing patterns, warranting personalized engagement strategies.
+
+```{r ordertypedistinct}
+#  Count the number of distinct ORDER_TYPE values per customer
+order_type_count <- stg_cust_tran_clean %>%
+  group_by(CUSTOMER_NUMBER) %>%
+  summarise(distinct_order_types = n_distinct(ORDER_TYPE, na.rm = TRUE)) %>%
+  ungroup()
+
+#  Display the result
+head(order_type_count)
+
+```
+
+#### Customer Engagement Across Multiple Order Types:
+Multi-order customers place orders through different channels, indicating diverse needs or purchasing behaviors.
+The SALES REP and MYCOKE LEGACY order types seem to generate higher total amounts, suggesting these are preferred channels.
+
+
+#### Order Amount Distribution:
+The data is highly skewed, with most orders being relatively small (75% are under $287.5), but a few exceptionally large orders inflate the mean.
+Large orders are more common in specific order types, like SALES REP and OTHER.
+
+
+#### Potential Data Issues:
+The presence of null in the ORDER_TYPE field suggests missing or unclassified data that may require investigation.
+Orders with zero amounts could be test records or incomplete transactions that should be filtered out in future analyses.
+
+```{r ordertypedetails}
+# Step 1: Identify customers with more than one order type
+multi_order_customers <- stg_cust_tran_clean %>%
+  group_by(CUSTOMER_NUMBER) %>%
+  summarise(distinct_order_types = n_distinct(ORDER_TYPE, na.rm = TRUE)) %>%
+  filter(distinct_order_types > 1) %>%
+  pull(CUSTOMER_NUMBER)
+
+# Step 2: Get the order types and their amounts for those customers
+order_type_details <- stg_cust_tran_clean %>%
+  filter(CUSTOMER_NUMBER %in% multi_order_customers) %>%
+  group_by(CUSTOMER_NUMBER, ORDER_TYPE) %>%
+  summarise(total_amount = sum(ordered_Total, na.rm = TRUE), .groups = "drop") %>%
+  arrange(CUSTOMER_NUMBER, desc(total_amount))
+
+# Step 3: Display the result
+head(order_type_details)
+summary(order_type_details)
+
+```
+
+```{r pivotordertype}
+# Pivot the data
+order_type_details_pivot <- order_type_details %>%
+  pivot_wider(names_from = ORDER_TYPE, values_from = total_amount, values_fill = 0)
+
+# Display the result
+head(order_type_details_pivot)
+
+```
+
+
+```{r ordertypejoin}
+#  Left join the pivoted order type columns to the main dataset
+customer_year_summary <- customer_year_summary %>%
+  left_join(order_type_details_pivot, by = "CUSTOMER_NUMBER")
+
+#  Display the updated dataset
+head(customer_year_summary)
+
+```
+
+### Review Percentage Change Modified Dataset
+
+Count of NAs in the percentage change data set. <br>
+
+
+**Columns with missing values:**
+*   total_order_2023: 2,683 missing values
+*   total_order_2024: 715 missing values
+*   percent_change: 3,398 missing values
+*   SALES_REP: 6,241 missing values
+*   CALL CENTER: 6,241 missing values
+*   MYCOKE LEGACY: 6,241 missing values
+*   MYCOKE360: 6,241 missing values
+*   OTHER: 6,241 missing values
+*   null: 6,241 missing values
+*   EDI: 6,241 missing values 
+
+**Columns with no missing values:**
+*   CUSTOMER_NUMBER
+*   COLD_DRINK_CHANNEL
+*   SUB_TRADE_CHANNEL
+*   LOCAL_MARKET_PARTNER
+*   FREQUENT_ORDER_TYPE
+*   TRADE_CHANNEL.x
+*   TRADE_CHANNEL.y
+*   CO2_CUSTOMER
+*   FIRST_DELIVERY_DATE
+*   years_since_first_order
+
+```{r nulls}
+# Count NA values for each column
+colSums(is.na(customer_year_summary))
+```
+
+
+```{r summary dim}
+dim(customer_year_summary)
+# there are 15914 rows and 21 columns
+```
+
+```{r dropnas}
+#dropping nas from customer yearly summary 
+complete_data <- customer_year_summary %>%
+  drop_na()
+#display data
+head(complete_data)
+
+```
+
+```{r displaycompletesummary}
+summary(complete_data)
+```
+
+```{r categorical encoding}
+# Select categorical variables (assuming non-numeric are categorical)
+categorical_vars <- complete_data %>%
+  select(where(is.factor)) %>%
+  colnames()
+
+#  One-hot encode the categorical variables
+customer_year_summary_hot <- complete_data %>%
+  dummy_cols(select_columns = categorical_vars, remove_first_dummy = TRUE, remove_selected_columns = TRUE)
+
+#  Display the updated dataset
+head(customer_year_summary_hot)
+
+```
+
+### Correlation Matrix of Modified Dataset
+
+#### Predictability of Future Orders:
+The strong correlation between orders in consecutive years suggests that past behavior is a reliable predictor of future orders.
+
+####  Customer Longevity Matters:
+While weak, the positive correlation between years_since_first_order and order volume indicates that long-standing customers tend to order more.
+
+#### Online Platforms Drive Volume:
+MYCOKE360 and MYCOKE LEGACY are strongly associated with higher total order volumes, emphasizing the importance of digital sales channels.
+
+#### Channel Independence:
+Weak correlations between channels like CALL CENTER and others suggest that customers typically prefer specific channels rather than mixing them.
+
+```{r corrplots categorical}
+# Select only numeric columns
+numeric_data <- complete_data %>%
+  select(where(is.numeric))
+
+# Calculate correlation matrix
+cor_matrix <- cor(numeric_data, use = "complete.obs")
+print(cor_matrix)
+
+
+
+# Visualize using corrplot
+corrplot(cor_matrix, method = "color", type = "upper", tl.cex = 0.8, number.cex = 0.7, addCoef.col = "black")
+
+```
+
+# Results
+
+The initial target variable for this analysis was a threshold of 400 gallons per year. Additionally, a second target variable was explored, capturing the percent change in order volume from 2023 to 2024.
+
+Analysis of customer orders revealed a notable decline in orders from 2023 to 2024. The number of customers who increased their order volume was approximately 1,000 fewer than those who reduced their orders, with only 146 customers maintaining the same order volume as the previous year. This substantial drop in order activity calls for further investigation to understand the factors influencing the few customers who did increase their orders, as well as the reasons behind the overall decline.
+
+In 2024, 2,119 customers received their first delivery, suggesting a positive rate of new customer acquisition. However, the data also suggests a trend where companies with longer duration since their first order experience slower growth, as the average growth percentage decreases over time. This indicates that older companies may be facing challenges in sustaining growth and indicates a desire for further investigation to identify key differences between high and low-growth companies.
+
+Among the trade channels, the highest growth percentages were observed in the activities and recreation sectors, indicating these categories experienced the most significant growth. Furthermore, it was confirmed that each customer belongs to only one trade channel, simplifying the analysis of growth trends within each sector.
+
+To improve the accuracy of growth thresholds, additional target variables are being considered. Missing data has been converted into binary variables to prevent information from being lost from the appearance of NA values. Moving forward, further exploration of the local market will be conducted, with separate analysis performed for local markets individually and combined with all other data. Additionally, the delivery dataset will be reevaluated to determine the best approach for incorporating this data into the overall analysis.
+
+# Group Member Contribution
+
+Andy Spendlove:
+
+*   Built preliminary solo EDA for review with group
+*   Wrote code in Explore Data section
+*   Plotted Barplots for Categorical Variables
+*   Plotted Ordered_Volume by Categorical Variables
+*   Created correlation matrix between numeric transaction features 
+*   Assisted in final compilation meetings
+
+Dan Powell:
+
+*   Built preliminary solo EDA for review with group
+*   Wrote code for Cleaning and Joining
+*   Assisted in final compilation meetings
+*   Led the use of Google Colab
+*   Export and final formatting review
+
+Jessica Kersey:
+
+*   Built preliminary solo EDA for review with group
+*   Wrote Introduction section
+*   Notebook organization (TOC, headers, grouping/reordering sections)
+*   Provided code for engineering 400 gallon avg per year target variable
+*   Assisted in final compilation
+
+Melissa Messervy:
+
+*   Built preliminary solo EDA for review with group
+*   Wrote Describe Data section
+*   Wrote Results section
+*   Assisted in final compilation meetings
+*   Final review andedits of written sections
+
+Tommaso Pascucci:
+
+*   Built preliminary solo EDA for review with group
+*   Wrote code in Explore Data section
+*   Engineering additional possible target variable of percent change (in gallons ordered from 2023 to 2024)
+*   Explored customer features
+*   Created correlation plots
